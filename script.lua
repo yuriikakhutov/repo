@@ -1,6 +1,12 @@
 local commander = { ui = {} }
 
-local menu_path = { "Utility", "Unit Commander" }
+local menu_info = {
+    first_tab = "Utility",
+    section = "Unit Commander",
+    second_tab = "General",
+    third_tab = "",
+    group = "Настройки",
+}
 
 local runtime = {
     hero = nil,
@@ -331,40 +337,58 @@ local function EnsureMenu()
         return
     end
 
-    if not Menu or not Menu.AddToggle then
+    if not Menu or not Menu.Create then
         return
     end
 
-    commander.ui.enable = Menu.AddToggle(menu_path, "Включить", true)
-    commander.ui.debug = Menu.AddToggle(menu_path, "Отладочная информация", false)
-    commander.ui.follow_distance = Menu.AddSlider(menu_path, "Дистанция следования", 150, 1200)
-    commander.ui.attack_radius = Menu.AddSlider(menu_path, "Радиус атаки", 300, 2000)
-    commander.ui.order_cooldown = Menu.AddSlider(menu_path, "Задержка приказов (мс)", 80, 600)
-    commander.ui.cast_cooldown = Menu.AddSlider(menu_path, "Пауза между кастами (мс)", 80, 500)
-    commander.ui.manual_lock = Menu.AddSlider(menu_path, "Ручной контроль (мс)", 300, 2500)
-    commander.ui.dominator = Menu.AddToggle(menu_path, "Автоиспользование Доминирования", true)
+    local ok, group = pcall(
+        Menu.Create,
+        menu_info.first_tab,
+        menu_info.section,
+        menu_info.second_tab,
+        menu_info.third_tab,
+        menu_info.group
+    )
 
-    if Menu.SetValue then
-        Menu.SetValue(commander.ui.follow_distance, DEFAULTS.follow_distance)
-        Menu.SetValue(commander.ui.attack_radius, DEFAULTS.attack_radius)
-        Menu.SetValue(commander.ui.order_cooldown, math.floor(DEFAULTS.order_cooldown * 1000))
-        Menu.SetValue(commander.ui.cast_cooldown, math.floor(DEFAULTS.cast_cooldown * 1000))
-        Menu.SetValue(commander.ui.manual_lock, math.floor(DEFAULTS.manual_lock * 1000))
+    if not ok or not group then
+        return
     end
+
+    commander.ui.group = group
+    commander.ui.enable = group:Switch("Включить", true)
+    commander.ui.debug = group:Switch("Отладочная информация", false)
+    commander.ui.follow_distance = group:Slider("Дистанция следования", 150, 1200, DEFAULTS.follow_distance, "%d")
+    commander.ui.attack_radius = group:Slider("Радиус атаки", 300, 2000, DEFAULTS.attack_radius, "%d")
+    commander.ui.order_cooldown = group:Slider(
+        "Задержка приказов (мс)",
+        80,
+        600,
+        math.floor(DEFAULTS.order_cooldown * 1000),
+        "%d"
+    )
+    commander.ui.cast_cooldown = group:Slider(
+        "Пауза между кастами (мс)",
+        80,
+        500,
+        math.floor(DEFAULTS.cast_cooldown * 1000),
+        "%d"
+    )
+    commander.ui.manual_lock = group:Slider(
+        "Ручной контроль (мс)",
+        300,
+        2500,
+        math.floor(DEFAULTS.manual_lock * 1000),
+        "%d"
+    )
+    commander.ui.dominator = group:Switch("Автоиспользование Доминирования", true)
 
     commander.menu_ready = true
 end
 
 local function MenuEnabled()
     EnsureMenu()
-    if not commander.ui.enable then
-        return true
-    end
-    if Menu.IsEnabled then
-        return Menu.IsEnabled(commander.ui.enable)
-    end
-    if Menu.GetValue then
-        return Menu.GetValue(commander.ui.enable) ~= 0
+    if commander.ui.enable and commander.ui.enable.Get then
+        return commander.ui.enable:Get()
     end
     return true
 end
@@ -372,6 +396,7 @@ end
 local function ReadConfig()
     EnsureMenu()
     runtime.config = runtime.config or {}
+
     if not commander.ui.enable then
         runtime.config.debug = false
         runtime.config.follow_distance = DEFAULTS.follow_distance
@@ -382,22 +407,34 @@ local function ReadConfig()
         runtime.config.auto_dominate = true
         return
     end
-    local get_value = Menu.GetValue or function()
-        return nil
-    end
-    local is_enabled = Menu.IsEnabled or function(option)
-        if Menu.GetValue then
-            return Menu.GetValue(option) ~= 0
+
+    local function slider_value(widget, default_value)
+        if widget and widget.Get then
+            local value = widget:Get()
+            if value ~= nil then
+                return value
+            end
         end
-        return true
+        return default_value
     end
-    runtime.config.debug = commander.ui.debug and is_enabled(commander.ui.debug)
-    runtime.config.follow_distance = get_value(commander.ui.follow_distance) or DEFAULTS.follow_distance
-    runtime.config.attack_radius = get_value(commander.ui.attack_radius) or DEFAULTS.attack_radius
-    runtime.config.order_cooldown = (get_value(commander.ui.order_cooldown) or math.floor(DEFAULTS.order_cooldown * 1000)) / 1000
-    runtime.config.cast_cooldown = (get_value(commander.ui.cast_cooldown) or math.floor(DEFAULTS.cast_cooldown * 1000)) / 1000
-    runtime.config.manual_lock = (get_value(commander.ui.manual_lock) or math.floor(DEFAULTS.manual_lock * 1000)) / 1000
-    runtime.config.auto_dominate = commander.ui.dominator and is_enabled(commander.ui.dominator)
+
+    local function switch_value(widget, default_value)
+        if widget and widget.Get then
+            local value = widget:Get()
+            if value ~= nil then
+                return value
+            end
+        end
+        return default_value
+    end
+
+    runtime.config.debug = switch_value(commander.ui.debug, false)
+    runtime.config.follow_distance = slider_value(commander.ui.follow_distance, DEFAULTS.follow_distance)
+    runtime.config.attack_radius = slider_value(commander.ui.attack_radius, DEFAULTS.attack_radius)
+    runtime.config.order_cooldown = slider_value(commander.ui.order_cooldown, math.floor(DEFAULTS.order_cooldown * 1000)) / 1000
+    runtime.config.cast_cooldown = slider_value(commander.ui.cast_cooldown, math.floor(DEFAULTS.cast_cooldown * 1000)) / 1000
+    runtime.config.manual_lock = slider_value(commander.ui.manual_lock, math.floor(DEFAULTS.manual_lock * 1000)) / 1000
+    runtime.config.auto_dominate = switch_value(commander.ui.dominator, true)
 end
 
 local function ResetRuntime()
