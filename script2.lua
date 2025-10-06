@@ -114,11 +114,11 @@ local function build_direction(reference)
         any_down = true
     end
     if Input.IsKeyDown(KEY_BINDINGS.right) then
-        direction = direction + right
+        direction = direction - right
         any_down = true
     end
     if Input.IsKeyDown(KEY_BINDINGS.left) then
-        direction = direction - right
+        direction = direction + right
         any_down = true
     end
 
@@ -198,11 +198,26 @@ function keyboard_move.OnUpdate()
 
     local direction, has_active_key = build_direction(reference)
     if not direction then
-        if not has_active_key then
-            state.last_direction = nil
-            state.next_order_time = 0
-            state.wait_release = false
+        if ui.hold:Get() and state.last_direction and not has_active_key then
+            Player.PrepareUnitOrders(
+                player,
+                Enum.UnitOrder.DOTA_UNIT_ORDER_STOP,
+                nil,
+                nil,
+                nil,
+                Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
+                issuers,
+                false,
+                false,
+                false,
+                false,
+                ORDER_IDENTIFIER
+            )
         end
+
+        state.last_direction = nil
+        state.next_order_time = 0
+        state.wait_release = false
         return
     end
 
