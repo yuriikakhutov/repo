@@ -2,16 +2,10 @@
 
 local keyboard_move = {}
 
-local menu_root = Menu.Create("Miscellaneous", "In Game", "Keyboard Move")
-local menu = menu_root:Create("Main"):Create("Keyboard Move")
-
-local ui = {
-    enabled = menu:Switch("Включить управление WASD", true, "\u{f11c}"),
-    distance = menu:Slider("Дистанция шага (юниты)", 100, 900, 420, "%d"),
-    lead = menu:Slider("Дополнительный запас", 0, 600, 160, "%d"),
-    interval = menu:Slider("Повтор приказа при удержании (мс)", 50, 400, 120, "%d"),
-    stop_on_release = menu:Switch("Останавливать при отпускании", true),
-}
+local STEP_DISTANCE = 420
+local LEAD_DISTANCE = 160
+local REPEAT_INTERVAL = 0.12 -- seconds
+local STOP_ON_RELEASE = true
 
 local KEY_ORDER = {
     Enum.ButtonCode.KEY_W,
@@ -147,14 +141,6 @@ local function issue_stop(player, units)
 end
 
 function keyboard_move.OnUpdate()
-    if not ui.enabled:Get() then
-        return
-    end
-
-    if Input.IsInputCaptured() then
-        return
-    end
-
     local player = Players.GetLocal()
     if not player then
         return
@@ -177,7 +163,7 @@ function keyboard_move.OnUpdate()
     local now = GlobalVars.GetCurTime()
 
     if not direction then
-        if state.moving and ui.stop_on_release:Get() then
+        if state.moving and STOP_ON_RELEASE then
             issue_stop(player, units)
         end
         state.moving = false
@@ -203,10 +189,10 @@ function keyboard_move.OnUpdate()
     end
 
     local origin = Entity.GetAbsOrigin(reference)
-    local distance = ui.distance:Get() + ui.lead:Get()
+    local distance = STEP_DISTANCE + LEAD_DISTANCE
     local target = adjust_target(origin, direction, distance)
     if not target then
-        state.next_order_time = now + ui.interval:Get() / 1000.0
+        state.next_order_time = now + REPEAT_INTERVAL
         return
     end
 
@@ -214,7 +200,7 @@ function keyboard_move.OnUpdate()
 
     state.last_direction = direction
     state.moving = true
-    state.next_order_time = now + ui.interval:Get() / 1000.0
+    state.next_order_time = now + REPEAT_INTERVAL
 end
 
 function keyboard_move.OnGameEnd()
