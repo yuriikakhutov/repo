@@ -1,49 +1,65 @@
--- Простая демо-сцена на Love2D, в которой главный герой может двигаться
--- с помощью клавиш WASD. Всё управление и логика сосредоточены в этом файле.
+-- Простая демо-сцена на Love2D, в которой главный герой перемещается по клику мыши,
+-- как в MOBA-играх вроде Dota 2. Всё управление и логика сосредоточены в этом файле.
 
 local hero = {
     x = 400,
     y = 300,
-    speed = 220,
+    speed = 260,
     size = 32,
     color = { r = 0.2, g = 0.6, b = 1.0 }
 }
 
+local target = {
+    x = hero.x,
+    y = hero.y
+}
+
 function love.load()
-    love.window.setTitle("WASD Hero Movement Demo")
+    love.window.setTitle("Mouse Click Hero Movement Demo")
 end
 
 local function handleMovement(dt)
-    local dx, dy = 0, 0
+    local dx = target.x - hero.x
+    local dy = target.y - hero.y
+    local distance = math.sqrt(dx * dx + dy * dy)
 
-    if love.keyboard.isDown("a") then
-        dx = dx - 1
-    end
-    if love.keyboard.isDown("d") then
-        dx = dx + 1
-    end
-    if love.keyboard.isDown("w") then
-        dy = dy - 1
-    end
-    if love.keyboard.isDown("s") then
-        dy = dy + 1
+    if distance < 1 then
+        hero.x = target.x
+        hero.y = target.y
+        return
     end
 
-    if dx ~= 0 or dy ~= 0 then
-        local length = math.sqrt(dx * dx + dy * dy)
-        dx, dy = dx / length, dy / length
+    local directionX = dx / distance
+    local directionY = dy / distance
+
+    local step = hero.speed * dt
+    if step > distance then
+        step = distance
     end
 
-    hero.x = hero.x + dx * hero.speed * dt
-    hero.y = hero.y + dy * hero.speed * dt
+    hero.x = hero.x + directionX * step
+    hero.y = hero.y + directionY * step
 
     local screenWidth, screenHeight = love.graphics.getDimensions()
     hero.x = math.max(hero.size / 2, math.min(screenWidth - hero.size / 2, hero.x))
     hero.y = math.max(hero.size / 2, math.min(screenHeight - hero.size / 2, hero.y))
+
+    if math.abs(hero.x - target.x) < 1 and math.abs(hero.y - target.y) < 1 then
+        hero.x = target.x
+        hero.y = target.y
+    end
 end
 
 function love.update(dt)
     handleMovement(dt)
+end
+
+function love.mousepressed(x, y, button)
+    if button == 2 then -- правая кнопка мыши, как в Dota 2
+        local screenWidth, screenHeight = love.graphics.getDimensions()
+        target.x = math.max(hero.size / 2, math.min(screenWidth - hero.size / 2, x))
+        target.y = math.max(hero.size / 2, math.min(screenHeight - hero.size / 2, y))
+    end
 end
 
 function love.draw()
@@ -51,5 +67,9 @@ function love.draw()
     love.graphics.rectangle("fill", hero.x - hero.size / 2, hero.y - hero.size / 2, hero.size, hero.size)
 
     love.graphics.setColor(1, 1, 1)
-    love.graphics.print("Двигайтесь при помощи клавиш W, A, S и D", 16, 16)
+    love.graphics.print("Кликайте ПКМ, чтобы отправить героя в точку, как в Dota 2", 16, 16)
+
+    love.graphics.setColor(0.8, 0.2, 0.2, 0.5)
+    love.graphics.circle("fill", target.x, target.y, 6)
+    love.graphics.setColor(1, 1, 1)
 end
