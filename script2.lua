@@ -8,7 +8,8 @@ local menu_group = menu_root:Create("Main"):Create("Keyboard Move")
 local ui = {
     enabled = menu_group:Switch("Включить WASD-передвижение", true, "\u{f11c}"),
     hold = menu_group:Switch("Повторять приказ при удержании", true),
-    distance = menu_group:Slider("Дистанция псевдоклика", 150, 900, 380, "%d"),
+    distance = menu_group:Slider("Базовая дистанция направления", 150, 900, 380, "%d"),
+    lead = menu_group:Slider("Дополнительный запас вперёд", 0, 600, 140, "%d"),
     interval = menu_group:Slider("Интервал повторных приказов (мс)", 40, 400, 120, "%d"),
     respect_state = menu_group:Switch("Не перебивать во время стана/канала", true),
 }
@@ -31,7 +32,8 @@ local ORDER_IDENTIFIER = "keyboard_wasd_move"
 
 local state = {
     next_order_time = 0,
-    last_direction = nil,
+    last_input_direction = nil,
+    last_order_direction = nil,
     wait_release = false,
 }
 
@@ -185,7 +187,8 @@ function keyboard_move.OnUpdate()
 
     local issuers, reference = collect_selected_units(player)
     if not issuers or not reference then
-        state.last_direction = nil
+        state.last_input_direction = nil
+        state.last_order_direction = nil
         state.next_order_time = 0
         state.wait_release = false
         return
@@ -198,7 +201,7 @@ function keyboard_move.OnUpdate()
 
     local direction, has_active_key = build_direction(reference)
     if not direction then
-        if ui.hold:Get() and state.last_direction and not has_active_key then
+        if ui.hold:Get() and state.last_order_direction and not has_active_key then
             Player.PrepareUnitOrders(
                 player,
                 Enum.UnitOrder.DOTA_UNIT_ORDER_STOP,
@@ -215,7 +218,8 @@ function keyboard_move.OnUpdate()
             )
         end
 
-        state.last_direction = nil
+        state.last_input_direction = nil
+        state.last_order_direction = nil
         state.next_order_time = 0
         state.wait_release = false
         return
@@ -225,9 +229,9 @@ function keyboard_move.OnUpdate()
     local should_issue = false
 
     if ui.hold:Get() then
-        if not state.last_direction or now >= state.next_order_time then
+        if not state.last_input_direction or now >= state.next_order_time then
             should_issue = true
-        elseif state.last_direction and direction:Dot2D(state.last_direction) < 0.995 then
+        elseif state.last_input_direction and direction:Dot2D(state.last_input_direction) < 0.995 then
             should_issue = true
         end
     else
@@ -246,18 +250,21 @@ function keyboard_move.OnUpdate()
     end
 
     local reference_pos = Entity.GetAbsOrigin(reference)
-    local distance = ui.distance:Get()
+    local distance = ui.distance:Get() + ui.lead:Get()
     local target = adjust_target(reference_pos, direction, distance)
     if not target then
         state.next_order_time = now + ui.interval:Get() / 1000.0
         return
     end
 
+    state.last_input_direction = direction
+    local ordered_direction = (target - reference_pos):Normalized()
+
     Player.PrepareUnitOrders(
         player,
-        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_DIRECTION,
         nil,
-        target,
+        ordered_direction,
         nil,
         Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
         issuers,
@@ -268,7 +275,7 @@ function keyboard_move.OnUpdate()
         ORDER_IDENTIFIER
     )
 
-    state.last_direction = direction
+    state.last_order_direction = ordered_direction
     if ui.hold:Get() then
         state.next_order_time = now + ui.interval:Get() / 1000.0
     else
@@ -277,7 +284,8 @@ function keyboard_move.OnUpdate()
 end
 
 function keyboard_move.OnGameEnd()
-    state.last_direction = nil
+    state.last_input_direction = nil
+    state.last_order_direction = nil
     state.next_order_time = 0
     state.wait_release = false
 end
