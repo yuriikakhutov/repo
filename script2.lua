@@ -1,146 +1,270 @@
--- Простая демо-сцена на Love2D, в которой главный герой перемещается по клику мыши,
--- как в MOBA-играх вроде Dota 2. Всё управление и логика сосредоточены в этом файле.
+---@diagnostic disable: undefined-global, param-type-mismatch, inject-field
 
-local hero = {
-    x = 400,
-    y = 300,
-    speed = 260,
-    size = 32,
-    color = { r = 0.2, g = 0.6, b = 1.0 }
+local keyboard_move = {}
+
+local menu_root = Menu.Create("Miscellaneous", "In Game", "Keyboard Move")
+local menu_group = menu_root:Create("Main"):Create("Keyboard Move")
+
+local ui = {
+    enabled = menu_group:Switch("Включить WASD-передвижение", true, "\u{f11c}"),
+    hold = menu_group:Switch("Повторять приказ при удержании", true),
+    distance = menu_group:Slider("Дистанция псевдоклика", 150, 900, 380, "%d"),
+    interval = menu_group:Slider("Интервал повторных приказов (мс)", 40, 400, 120, "%d"),
+    respect_state = menu_group:Switch("Не перебивать во время стана/канала", true),
 }
 
-local target = {
-    x = hero.x,
-    y = hero.y
+local KEY_BINDINGS = {
+    forward = Enum.ButtonCode.KEY_W,
+    back = Enum.ButtonCode.KEY_S,
+    left = Enum.ButtonCode.KEY_A,
+    right = Enum.ButtonCode.KEY_D,
 }
 
-local clickDistance = 180 -- дистанция условного "клика" от клавиатурной команды
+local KEY_LIST = {
+    Enum.ButtonCode.KEY_W,
+    Enum.ButtonCode.KEY_S,
+    Enum.ButtonCode.KEY_A,
+    Enum.ButtonCode.KEY_D,
+}
 
-local function clampToWindow(x, y)
-    local screenWidth, screenHeight = love.graphics.getDimensions()
-    local minX = hero.size / 2
-    local maxX = screenWidth - hero.size / 2
-    local minY = hero.size / 2
-    local maxY = screenHeight - hero.size / 2
+local ORDER_IDENTIFIER = "keyboard_wasd_move"
 
-    return math.max(minX, math.min(maxX, x)), math.max(minY, math.min(maxY, y))
+local state = {
+    next_order_time = 0,
+    last_direction = nil,
+    wait_release = false,
+}
+
+local function any_key_pressed_once()
+    for i = 1, #KEY_LIST do
+        if Input.IsKeyDownOnce(KEY_LIST[i]) then
+            return true
+        end
+    end
+
+    return false
 end
 
-function love.load()
-    love.window.setTitle("Mouse Click Hero Movement Demo")
+local function collect_selected_units(player)
+    local selected = Player.GetSelectedUnits(player)
+    if not selected or #selected == 0 then
+        return nil, nil
+    end
+
+    local alive = {}
+    local player_id = Player.GetPlayerID(player)
+    for i = 1, #selected do
+        local unit = selected[i]
+        if
+            Entity.IsNPC(unit)
+            and Entity.IsAlive(unit)
+            and (not player_id or Entity.IsControllableByPlayer(unit, player_id))
+        then
+            alive[#alive + 1] = unit
+        end
+    end
+
+    if #alive == 0 then
+        return nil, nil
+    end
+
+    local hero = Heroes.GetLocal()
+    if hero then
+        local hero_index = Entity.GetIndex(hero)
+        for i = 1, #alive do
+            if Entity.GetIndex(alive[i]) == hero_index then
+                return alive, alive[i]
+            end
+        end
+    end
+
+    return alive, alive[1]
 end
 
-local function setTarget(x, y)
-    target.x, target.y = clampToWindow(x, y)
+local function build_direction(reference)
+    local rotation = Entity.GetRotation(reference)
+    if not rotation then
+        return nil, false
+    end
+
+    local forward, right = rotation:GetVectors()
+    if not forward or not right then
+        return nil, false
+    end
+
+    forward.z = 0
+    right.z = 0
+
+    if forward:Length2D() == 0 or right:Length2D() == 0 then
+        return nil, false
+    end
+
+    forward = forward:Normalized()
+    right = right:Normalized()
+
+    local direction = Vector()
+    local any_down = false
+
+    if Input.IsKeyDown(KEY_BINDINGS.forward) then
+        direction = direction + forward
+        any_down = true
+    end
+    if Input.IsKeyDown(KEY_BINDINGS.back) then
+        direction = direction - forward
+        any_down = true
+    end
+    if Input.IsKeyDown(KEY_BINDINGS.right) then
+        direction = direction + right
+        any_down = true
+    end
+    if Input.IsKeyDown(KEY_BINDINGS.left) then
+        direction = direction - right
+        any_down = true
+    end
+
+    if not any_down then
+        return nil, false
+    end
+
+    direction.z = 0
+    if direction:Length2D() == 0 then
+        return nil, true
+    end
+
+    direction = direction:Normalized()
+    return direction, true
 end
 
-local function simulateRightClick(x, y)
-    local clampedX, clampedY = clampToWindow(x, y)
+local function can_issue(reference)
+    if not reference or not Entity.IsAlive(reference) then
+        return false
+    end
 
-    love.event.push("mousepressed", clampedX, clampedY, 2, false, 1)
-    love.event.push("mousereleased", clampedX, clampedY, 2, false, 1)
+    if ui.respect_state:Get() and (NPC.IsStunned(reference) or NPC.IsChannellingAbility(reference)) then
+        return false
+    end
+
+    return true
 end
 
-local function handleMovement(dt)
-    local dx = target.x - hero.x
-    local dy = target.y - hero.y
-    local distance = math.sqrt(dx * dx + dy * dy)
+local function adjust_target(reference_pos, direction, distance)
+    local target = reference_pos + direction:Scaled(distance)
+    if GridNav.IsTraversableFromTo(reference_pos, target, false, nil) then
+        return target
+    end
 
-    if distance < 1 then
-        hero.x = target.x
-        hero.y = target.y
+    local step = distance
+    for _ = 1, 4 do
+        step = step * 0.5
+        if step < 25 then
+            break
+        end
+
+        target = reference_pos + direction:Scaled(step)
+        if GridNav.IsTraversableFromTo(reference_pos, target, false, nil) then
+            return target
+        end
+    end
+
+    return nil
+end
+
+function keyboard_move.OnUpdate()
+    if not ui.enabled:Get() then
         return
     end
 
-    local directionX = dx / distance
-    local directionY = dy / distance
-
-    local step = hero.speed * dt
-    if step > distance then
-        step = distance
+    if Input.IsInputCaptured() then
+        return
     end
 
-    hero.x = hero.x + directionX * step
-    hero.y = hero.y + directionY * step
-
-    hero.x, hero.y = clampToWindow(hero.x, hero.y)
-
-    if math.abs(hero.x - target.x) < 1 and math.abs(hero.y - target.y) < 1 then
-        hero.x = target.x
-        hero.y = target.y
-    end
-end
-
-function love.update(dt)
-    handleMovement(dt)
-end
-
-function love.mousepressed(x, y, button)
-    if button == 2 then -- правая кнопка мыши, как в Dota 2
-        setTarget(x, y)
-    end
-end
-
-function love.keypressed(key)
-    local direction = nil
-
-    if key == "w" then
-        direction = { x = 0, y = -1 }
-    elseif key == "s" then
-        direction = { x = 0, y = 1 }
-    elseif key == "a" then
-        direction = { x = -1, y = 0 }
-    elseif key == "d" then
-        direction = { x = 1, y = 0 }
+    local player = Players.GetLocal()
+    if not player then
+        return
     end
 
+    local issuers, reference = collect_selected_units(player)
+    if not issuers or not reference then
+        state.last_direction = nil
+        state.next_order_time = 0
+        state.wait_release = false
+        return
+    end
+
+    if not can_issue(reference) then
+        state.next_order_time = 0
+        return
+    end
+
+    local direction, has_active_key = build_direction(reference)
     if not direction then
+        if not has_active_key then
+            state.last_direction = nil
+            state.next_order_time = 0
+            state.wait_release = false
+        end
         return
     end
 
-    local horizontal = 0
-    if love.keyboard.isDown("a") then
-        horizontal = horizontal - 1
-    end
-    if love.keyboard.isDown("d") then
-        horizontal = horizontal + 1
+    local now = GlobalVars.GetCurTime()
+    local should_issue = false
+
+    if ui.hold:Get() then
+        if not state.last_direction or now >= state.next_order_time then
+            should_issue = true
+        elseif state.last_direction and direction:Dot2D(state.last_direction) < 0.995 then
+            should_issue = true
+        end
+    else
+        if state.wait_release then
+            if not has_active_key then
+                state.wait_release = false
+            end
+        elseif any_key_pressed_once() then
+            should_issue = true
+            state.wait_release = true
+        end
     end
 
-    local vertical = 0
-    if love.keyboard.isDown("w") then
-        vertical = vertical - 1
-    end
-    if love.keyboard.isDown("s") then
-        vertical = vertical + 1
-    end
-
-    if horizontal == 0 and vertical == 0 then
-        horizontal = direction.x
-        vertical = direction.y
-    end
-
-    local length = math.sqrt(horizontal * horizontal + vertical * vertical)
-    if length == 0 then
+    if not should_issue then
         return
     end
 
-    local normX = horizontal / length
-    local normY = vertical / length
+    local reference_pos = Entity.GetAbsOrigin(reference)
+    local distance = ui.distance:Get()
+    local target = adjust_target(reference_pos, direction, distance)
+    if not target then
+        state.next_order_time = now + ui.interval:Get() / 1000.0
+        return
+    end
 
-    local newX = hero.x + normX * clickDistance
-    local newY = hero.y + normY * clickDistance
+    Player.PrepareUnitOrders(
+        player,
+        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+        nil,
+        target,
+        nil,
+        Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
+        issuers,
+        false,
+        false,
+        false,
+        false,
+        ORDER_IDENTIFIER
+    )
 
-    simulateRightClick(newX, newY)
+    state.last_direction = direction
+    if ui.hold:Get() then
+        state.next_order_time = now + ui.interval:Get() / 1000.0
+    else
+        state.next_order_time = 0
+    end
 end
 
-function love.draw()
-    love.graphics.setColor(hero.color.r, hero.color.g, hero.color.b)
-    love.graphics.rectangle("fill", hero.x - hero.size / 2, hero.y - hero.size / 2, hero.size, hero.size)
-
-    love.graphics.setColor(1, 1, 1)
-    love.graphics.print("ПКМ или WASD (эмулируют ПКМ-клик) — отправьте героя в точку", 16, 16)
-
-    love.graphics.setColor(0.8, 0.2, 0.2, 0.5)
-    love.graphics.circle("fill", target.x, target.y, 6)
-    love.graphics.setColor(1, 1, 1)
+function keyboard_move.OnGameEnd()
+    state.last_direction = nil
+    state.next_order_time = 0
+    state.wait_release = false
 end
+
+return keyboard_move
