@@ -83,44 +83,24 @@ local function collect_selected_units(player)
     return alive, alive[1]
 end
 
-local function build_direction(reference)
-    local rotation = Entity.GetRotation(reference)
-    if not rotation then
-        return nil, false
-    end
-
-    local forward, right = rotation:GetVectors()
-    if not forward or not right then
-        return nil, false
-    end
-
-    forward.z = 0
-    right.z = 0
-
-    if forward:Length2D() == 0 or right:Length2D() == 0 then
-        return nil, false
-    end
-
-    forward = forward:Normalized()
-    right = right:Normalized()
-
+local function build_direction()
     local direction = Vector()
     local any_down = false
 
     if Input.IsKeyDown(KEY_BINDINGS.forward) then
-        direction = direction + forward
+        direction = direction + Vector(0, 1, 0)
         any_down = true
     end
     if Input.IsKeyDown(KEY_BINDINGS.back) then
-        direction = direction - forward
+        direction = direction + Vector(0, -1, 0)
         any_down = true
     end
     if Input.IsKeyDown(KEY_BINDINGS.right) then
-        direction = direction - right
+        direction = direction + Vector(1, 0, 0)
         any_down = true
     end
     if Input.IsKeyDown(KEY_BINDINGS.left) then
-        direction = direction + right
+        direction = direction + Vector(-1, 0, 0)
         any_down = true
     end
 
@@ -199,7 +179,7 @@ function keyboard_move.OnUpdate()
         return
     end
 
-    local direction, has_active_key = build_direction(reference)
+    local direction, has_active_key = build_direction()
     if not direction then
         if ui.hold:Get() and state.last_order_direction and not has_active_key then
             Player.PrepareUnitOrders(
@@ -258,13 +238,11 @@ function keyboard_move.OnUpdate()
     end
 
     state.last_input_direction = direction
-    local ordered_direction = (target - reference_pos):Normalized()
-
     Player.PrepareUnitOrders(
         player,
-        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_DIRECTION,
+        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
         nil,
-        ordered_direction,
+        target,
         nil,
         Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
         issuers,
@@ -275,7 +253,7 @@ function keyboard_move.OnUpdate()
         ORDER_IDENTIFIER
     )
 
-    state.last_order_direction = ordered_direction
+    state.last_order_direction = (target - reference_pos):Normalized()
     if ui.hold:Get() then
         state.next_order_time = now + ui.interval:Get() / 1000.0
     else
