@@ -1,517 +1,943 @@
-local commander = {}
+local commander = { ui = {} }
 
-local state = {
+local menu_path = { "Utility", "Unit Commander" }
+
+local runtime = {
     hero = nil,
     team = nil,
-    player = nil,
     player_id = nil,
-    units = {},
-    manual_lock = {},
-    last_dominate_attempt = 0,
+    player = nil,
+    agents = {},
+    focus_target = nil,
+    threat_memory = {},
+    last_focus_check = 0,
 }
 
-local FOLLOW_DISTANCE = 425
-local ATTACK_RADIUS = 1000
-local ORDER_COOLDOWN = 0.25
-local CAST_COOLDOWN = 0.35
-local MANUAL_SUPPRESSION = 0.9
+local STATES = {
+    FOLLOW = "FOLLOW",
+    CHASE = "CHASE",
+    HOLD = "HOLD",
+    MANUAL = "MANUAL",
+    CASTING = "CASTING",
+}
+
+local DEFAULTS = {
+    follow_distance = 425,
+    attack_radius = 900,
+    order_cooldown = 0.3,
+    cast_cooldown = 0.2,
+    manual_lock = 1.2,
+    dominator_range = 900,
+}
 
 local DOMINATOR_ITEMS = {
-    "item_helm_of_the_dominator",
-    "item_helm_of_the_overlord",
+    item_helm_of_the_dominator = true,
+    item_helm_of_the_overlord = true,
 }
 
 local DOMINATOR_PRIORITY = {
-    npc_dota_neutral_black_dragon = 500,
-    npc_dota_neutral_granite_golem = 480,
-    npc_dota_neutral_elder_jungle_stalker = 460,
-    npc_dota_neutral_prowler_acolyte = 450,
-    npc_dota_neutral_rock_golem = 440,
-    npc_dota_neutral_big_thunder_lizard = 420,
-    npc_dota_neutral_dark_troll_warlord = 350,
-    npc_dota_neutral_enraged_wildkin = 340,
-    npc_dota_neutral_polar_furbolg_ursa_warrior = 330,
-    npc_dota_neutral_polar_furbolg_champion = 330,
-    npc_dota_neutral_satyr_hellcaller = 320,
-    npc_dota_neutral_centaur_khan = 310,
-    npc_dota_neutral_ogre_magi = 300,
-    npc_dota_neutral_ogre_mauler = 295,
-    npc_dota_neutral_mud_golem = 250,
-    npc_dota_neutral_fel_beast = 240,
-    npc_dota_neutral_wildkin = 230,
-    npc_dota_neutral_harpy_storm = 220,
-    npc_dota_neutral_alpha_wolf = 215,
+    npc_dota_neutral_black_dragon = 600,
+    npc_dota_neutral_granite_golem = 590,
+    npc_dota_neutral_rock_golem = 560,
+    npc_dota_neutral_elder_jungle_stalker = 540,
+    npc_dota_neutral_prowler_acolyte = 520,
+    npc_dota_neutral_big_thunder_lizard = 500,
+    npc_dota_neutral_dark_troll_warlord = 480,
+    npc_dota_neutral_enraged_wildkin = 470,
+    npc_dota_neutral_polar_furbolg_ursa_warrior = 460,
+    npc_dota_neutral_polar_furbolg_champion = 450,
+    npc_dota_neutral_satyr_hellcaller = 440,
+    npc_dota_neutral_centaur_khan = 420,
+    npc_dota_neutral_ogre_magi = 400,
+    npc_dota_neutral_ogre_mauler = 390,
+    npc_dota_neutral_mud_golem = 360,
+    npc_dota_neutral_wildkin = 340,
+    npc_dota_neutral_fel_beast = 320,
+    npc_dota_neutral_harpy_storm = 310,
+    npc_dota_neutral_harpy_scout = 280,
+    npc_dota_neutral_satyr_trickster = 260,
+    npc_dota_neutral_satyr_soulstealer = 250,
 }
 
-local ANCIENT_NEUTRALS = {
+local ANCIENT_UNITS = {
     npc_dota_neutral_black_dragon = true,
     npc_dota_neutral_granite_golem = true,
     npc_dota_neutral_rock_golem = true,
     npc_dota_neutral_elder_jungle_stalker = true,
-    npc_dota_neutral_prowler_acolyte = true,
     npc_dota_neutral_big_thunder_lizard = true,
+    npc_dota_neutral_prowler_acolyte = true,
 }
 
-local ability_data = {}
+local ABILITY_DATA = {}
 
-local function register_ability(name, data)
-    ability_data[name] = data
+local SafeOrder
+
+local function RegisterAbility(name, data)
+    ABILITY_DATA[name] = data
     if data.aliases then
         for _, alias in ipairs(data.aliases) do
-            ability_data[alias] = data
+            ABILITY_DATA[alias] = data
         end
     end
 end
 
-register_ability("mud_golem_hurl_boulder", {
-    type = "target",
+RegisterAbility("mud_golem_hurl_boulder", {
+    behavior = "target",
     allow_neutrals = true,
-    min_interval = 0.2,
-    message = "boulder",
+    min_interval = 0.4,
+    score = 30,
     aliases = {
         "granite_golem_hurl_boulder",
         "ancient_rock_golem_hurl_boulder",
     },
 })
 
-register_ability("dark_troll_warlord_ensnare", {
-    type = "target",
+RegisterAbility("dark_troll_warlord_ensnare", {
+    behavior = "target",
     allow_neutrals = true,
+    min_interval = 0.6,
+    score = 25,
 })
 
-register_ability("dark_troll_warlord_raise_dead", {
-    type = "no_target",
-    always = true,
-    min_interval = 8,
+RegisterAbility("dark_troll_warlord_raise_dead", {
+    behavior = "no_target",
+    always_cast = true,
+    min_interval = 9,
+    score = 15,
 })
 
-register_ability("forest_troll_high_priest_heal", {
-    type = "ally",
+RegisterAbility("forest_troll_high_priest_heal", {
+    behavior = "ally",
     prefer_hero = true,
-    ally_max_hp = 0.92,
+    ally_max_health = 0.92,
+    min_interval = 1.5,
 })
 
-register_ability("satyr_hellcaller_shockwave", {
-    type = "point",
+RegisterAbility("centaur_khan_war_stomp", {
+    behavior = "no_target",
+    radius = 315,
+    min_enemies = 1,
     allow_neutrals = true,
+    score = 30,
 })
 
-register_ability("satyr_trickster_purge", {
-    type = "target",
+RegisterAbility("centaur_conqueror_war_stomp", {
+    behavior = "no_target",
+    radius = 315,
+    min_enemies = 1,
     allow_neutrals = true,
-    min_interval = 4,
+    score = 30,
 })
 
-register_ability("satyr_soulstealer_mana_burn", {
-    type = "target",
-    only_heroes = true,
-    min_interval = 4,
-    aliases = {
-        "satyr_mindstealer_mana_burn",
-    },
-})
-
-register_ability("harpy_storm_chain_lightning", {
-    type = "target",
-    allow_neutrals = true,
-    min_interval = 2.5,
-})
-
-register_ability("centaur_khan_war_stomp", {
-    type = "no_target",
+RegisterAbility("polar_furbolg_ursa_warrior_thunder_clap", {
+    behavior = "no_target",
     radius = 325,
     min_enemies = 1,
     allow_neutrals = true,
-})
-
-register_ability("polar_furbolg_ursa_warrior_thunder_clap", {
-    type = "no_target",
-    radius = 350,
-    min_enemies = 1,
-    allow_neutrals = true,
+    score = 24,
     aliases = {
         "polar_furbolg_champion_thunder_clap",
     },
 })
 
-register_ability("hellbear_smasher_slam", {
-    type = "no_target",
-    radius = 350,
+RegisterAbility("hellbear_smasher_slam", {
+    behavior = "no_target",
+    radius = 325,
     min_enemies = 1,
     allow_neutrals = true,
+    score = 24,
 })
 
-register_ability("ogre_bruiser_ogre_smash", {
-    type = "point",
+RegisterAbility("ogre_bruiser_ogre_smash", {
+    behavior = "point",
     allow_neutrals = true,
-    range_bonus = 60,
+    range_bonus = 50,
+    min_interval = 1.0,
+    score = 28,
     aliases = {
         "ogre_mauler_smash",
     },
 })
 
-register_ability("neutral_ogre_magi_ice_armor", {
-    type = "ally",
+RegisterAbility("ogre_magi_frost_armor", {
+    behavior = "ally",
     prefer_hero = true,
-    ally_max_hp = 0.97,
+    ally_max_health = 0.95,
     avoid_modifier = "modifier_ogre_magi_frost_armor",
+    min_interval = 5,
     aliases = {
-        "ogre_magi_frost_armor",
+        "neutral_ogre_magi_ice_armor",
     },
 })
 
-register_ability("ancient_black_dragon_fireball", {
-    type = "point",
+RegisterAbility("satyr_hellcaller_shockwave", {
+    behavior = "point",
+    allow_neutrals = true,
+    min_interval = 0.7,
+    score = 26,
+})
+
+RegisterAbility("satyr_trickster_purge", {
+    behavior = "target",
     allow_neutrals = true,
     min_interval = 4,
-    aliases = {
-        "black_dragon_fireball",
-    },
+    score = 10,
 })
 
-register_ability("ancient_thunderhide_slam", {
-    type = "no_target",
-    radius = 325,
-    min_enemies = 1,
-    allow_neutrals = true,
-    aliases = {
-        "big_thunder_lizard_slam",
-    },
-})
-
-register_ability("ancient_thunderhide_frenzy", {
-    type = "ally",
-    prefer_hero = true,
-    include_self = false,
-    min_interval = 6,
-    aliases = {
-        "big_thunder_lizard_frenzy",
-    },
-})
-
-register_ability("fel_beast_haunt", {
-    type = "target",
-    allow_neutrals = true,
+RegisterAbility("satyr_soulstealer_mana_burn", {
+    behavior = "target",
+    only_heroes = true,
     min_interval = 4,
+    score = 12,
+    aliases = {
+        "satyr_mindstealer_mana_burn",
+    },
 })
 
-register_ability("enraged_wildkin_tornado", {
-    type = "point",
+RegisterAbility("harpy_storm_chain_lightning", {
+    behavior = "target",
     allow_neutrals = true,
-    min_interval = 12,
+    min_interval = 2.5,
+    score = 16,
+})
+
+RegisterAbility("harpy_scout_chain_lightning", {
+    behavior = "target",
+    allow_neutrals = true,
+    min_interval = 2.5,
+    score = 12,
+})
+
+RegisterAbility("enraged_wildkin_tornado", {
+    behavior = "point",
+    allow_neutrals = true,
+    min_interval = 5,
+    score = 20,
     aliases = {
         "wildkin_tornado",
     },
 })
 
-register_ability("wildkin_hurricane", {
-    type = "point",
+RegisterAbility("wildkin_hurricane", {
+    behavior = "point",
     allow_neutrals = true,
     min_interval = 6,
+    score = 15,
 })
 
-register_ability("prowler_acolyte_heal", {
-    type = "ally",
+RegisterAbility("fel_beast_haunt", {
+    behavior = "target",
+    allow_neutrals = true,
+    min_interval = 4,
+    score = 14,
+})
+
+RegisterAbility("ancient_black_dragon_fireball", {
+    behavior = "point",
+    allow_neutrals = true,
+    min_interval = 4,
+    score = 34,
+    aliases = {
+        "black_dragon_fireball",
+    },
+})
+
+RegisterAbility("ancient_black_drake_fireball", {
+    behavior = "point",
+    allow_neutrals = true,
+    min_interval = 4.5,
+    score = 22,
+})
+
+RegisterAbility("ancient_thunderhide_slam", {
+    behavior = "no_target",
+    radius = 315,
+    min_enemies = 1,
+    allow_neutrals = true,
+    score = 32,
+    aliases = {
+        "big_thunder_lizard_slam",
+    },
+})
+
+RegisterAbility("ancient_thunderhide_frenzy", {
+    behavior = "ally",
     prefer_hero = true,
-    ally_max_hp = 0.85,
+    include_self = false,
+    min_interval = 6,
+    score = 18,
+    aliases = {
+        "big_thunder_lizard_frenzy",
+    },
 })
 
-register_ability("kobold_taskmaster_speed_aura", {
-    type = "no_target",
-    always = true,
-    min_interval = 12,
+RegisterAbility("ancient_rumblehide_piercing_roar", {
+    behavior = "no_target",
+    radius = 300,
+    min_enemies = 1,
+    allow_neutrals = true,
+    min_interval = 6,
+    score = 20,
 })
 
-register_ability("neutral_spell_immunity", {
-    type = "no_target",
-    always = true,
-    min_interval = 14,
+RegisterAbility("prowler_acolyte_heal", {
+    behavior = "ally",
+    prefer_hero = true,
+    ally_max_health = 0.85,
+    min_interval = 3,
+    score = 18,
 })
 
-local function reset_state()
-    state.hero = nil
-    state.team = nil
-    state.player = nil
-    state.player_id = nil
-    state.units = {}
-    state.manual_lock = {}
-    state.last_dominate_attempt = 0
-end
+RegisterAbility("alpha_wolf_command_aura", {
+    behavior = "ally",
+    prefer_hero = true,
+    include_self = false,
+    min_interval = 6,
+    score = 8,
+})
 
-local function current_time()
-    if GlobalVars and GlobalVars.GetCurTime then
-        return GlobalVars.GetCurTime()
+RegisterAbility("kobold_taskmaster_speed_aura", {
+    behavior = "no_target",
+    always_cast = true,
+    min_interval = 6,
+    score = 6,
+})
+
+RegisterAbility("ghost_frost_attack", {
+    behavior = "target",
+    allow_neutrals = true,
+    min_interval = 3,
+    score = 8,
+})
+
+RegisterAbility("ogre_seer_bloodlust", {
+    behavior = "ally",
+    prefer_hero = true,
+    include_self = true,
+    min_interval = 4,
+    score = 18,
+})
+
+RegisterAbility("dark_troll_priest_heal", {
+    behavior = "ally",
+    prefer_hero = true,
+    ally_max_health = 0.9,
+    min_interval = 1.8,
+    score = 14,
+})
+
+local function EnsureMenu()
+    if commander.menu_ready then
+        return
     end
-    return os.clock()
+
+    if not Menu or not Menu.AddToggle then
+        return
+    end
+
+    commander.ui.enable = Menu.AddToggle(menu_path, "Включить", true)
+    commander.ui.debug = Menu.AddToggle(menu_path, "Отладочная информация", false)
+    commander.ui.follow_distance = Menu.AddSlider(menu_path, "Дистанция следования", 150, 1200)
+    commander.ui.attack_radius = Menu.AddSlider(menu_path, "Радиус атаки", 300, 2000)
+    commander.ui.order_cooldown = Menu.AddSlider(menu_path, "Задержка приказов (мс)", 80, 600)
+    commander.ui.cast_cooldown = Menu.AddSlider(menu_path, "Пауза между кастами (мс)", 80, 500)
+    commander.ui.manual_lock = Menu.AddSlider(menu_path, "Ручной контроль (мс)", 300, 2500)
+    commander.ui.dominator = Menu.AddToggle(menu_path, "Автоиспользование Доминирования", true)
+
+    if Menu.SetValue then
+        Menu.SetValue(commander.ui.follow_distance, DEFAULTS.follow_distance)
+        Menu.SetValue(commander.ui.attack_radius, DEFAULTS.attack_radius)
+        Menu.SetValue(commander.ui.order_cooldown, math.floor(DEFAULTS.order_cooldown * 1000))
+        Menu.SetValue(commander.ui.cast_cooldown, math.floor(DEFAULTS.cast_cooldown * 1000))
+        Menu.SetValue(commander.ui.manual_lock, math.floor(DEFAULTS.manual_lock * 1000))
+    end
+
+    commander.menu_ready = true
 end
 
-local function ensure_player()
-    state.player = Players and Players.GetLocal and Players.GetLocal() or nil
-    if state.player and Player and Player.GetPlayerID then
-        local ok, pid = pcall(Player.GetPlayerID, state.player)
-        if ok and type(pid) == "number" and pid >= 0 then
-            state.player_id = pid
+local function MenuEnabled()
+    EnsureMenu()
+    if not commander.ui.enable then
+        return true
+    end
+    if Menu.IsEnabled then
+        return Menu.IsEnabled(commander.ui.enable)
+    end
+    if Menu.GetValue then
+        return Menu.GetValue(commander.ui.enable) ~= 0
+    end
+    return true
+end
+
+local function ReadConfig()
+    EnsureMenu()
+    runtime.config = runtime.config or {}
+    if not commander.ui.enable then
+        runtime.config.debug = false
+        runtime.config.follow_distance = DEFAULTS.follow_distance
+        runtime.config.attack_radius = DEFAULTS.attack_radius
+        runtime.config.order_cooldown = DEFAULTS.order_cooldown
+        runtime.config.cast_cooldown = DEFAULTS.cast_cooldown
+        runtime.config.manual_lock = DEFAULTS.manual_lock
+        runtime.config.auto_dominate = true
+        return
+    end
+    local get_value = Menu.GetValue or function()
+        return nil
+    end
+    local is_enabled = Menu.IsEnabled or function(option)
+        if Menu.GetValue then
+            return Menu.GetValue(option) ~= 0
+        end
+        return true
+    end
+    runtime.config.debug = commander.ui.debug and is_enabled(commander.ui.debug)
+    runtime.config.follow_distance = get_value(commander.ui.follow_distance) or DEFAULTS.follow_distance
+    runtime.config.attack_radius = get_value(commander.ui.attack_radius) or DEFAULTS.attack_radius
+    runtime.config.order_cooldown = (get_value(commander.ui.order_cooldown) or math.floor(DEFAULTS.order_cooldown * 1000)) / 1000
+    runtime.config.cast_cooldown = (get_value(commander.ui.cast_cooldown) or math.floor(DEFAULTS.cast_cooldown * 1000)) / 1000
+    runtime.config.manual_lock = (get_value(commander.ui.manual_lock) or math.floor(DEFAULTS.manual_lock * 1000)) / 1000
+    runtime.config.auto_dominate = commander.ui.dominator and is_enabled(commander.ui.dominator)
+end
+
+local function ResetRuntime()
+    runtime.hero = nil
+    runtime.team = nil
+    runtime.player_id = nil
+    runtime.player = nil
+    runtime.agents = {}
+    runtime.focus_target = nil
+    runtime.threat_memory = {}
+    runtime.last_focus_check = 0
+end
+
+local function Distance(a, b)
+    if not a or not b then
+        return math.huge
+    end
+    if a.Distance then
+        return a:Distance(b)
+    end
+    local ax = a.GetX and a:GetX() or a.x or a[1] or 0
+    local ay = a.GetY and a:GetY() or a.y or a[2] or 0
+    local az = a.GetZ and a:GetZ() or a.z or a[3] or 0
+    local bx = b.GetX and b:GetX() or b.x or b[1] or 0
+    local by = b.GetY and b:GetY() or b.y or b[2] or 0
+    local bz = b.GetZ and b:GetZ() or b.z or b[3] or 0
+    local dx = ax - bx
+    local dy = ay - by
+    local dz = az - bz
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function AcquirePlayer()
+    if runtime.player and runtime.player_id then
+        return runtime.player
+    end
+
+    if runtime.player_id and PlayerResource and PlayerResource.GetPlayer then
+        runtime.player = PlayerResource.GetPlayer(runtime.player_id)
+        if runtime.player then
+            return runtime.player
         end
     end
-end
 
-local function ensure_hero()
-    if not Heroes or not Heroes.GetLocal then
-        return false
+    if Players and Players.GetLocal then
+        runtime.player = Players.GetLocal()
+        if runtime.player then
+            if Player and Player.GetPlayerID then
+                runtime.player_id = Player.GetPlayerID(runtime.player)
+            end
+            return runtime.player
+        end
     end
 
-    local hero = Heroes.GetLocal()
+    return nil
+end
+
+local function UpdateHeroContext()
+    local hero = Heroes and Heroes.GetLocal and Heroes.GetLocal() or nil
     if not hero or not Entity.IsAlive(hero) then
-        state.hero = nil
+        ResetRuntime()
         return false
     end
 
-    state.hero = hero
-    state.team = Entity.GetTeamNum(hero)
+    runtime.hero = hero
+    runtime.team = Entity.GetTeamNum(hero)
 
-    if Hero and Hero.GetPlayerID then
-        local ok, pid = pcall(Hero.GetPlayerID, hero)
-        if ok and type(pid) == "number" and pid >= 0 then
-            state.player_id = pid
+    if runtime.player_id == nil then
+        if Hero and Hero.GetPlayerID then
+            runtime.player_id = Hero.GetPlayerID(hero)
         end
     end
 
-    if not state.player then
-        ensure_player()
-    end
-
+    AcquirePlayer()
     return true
 end
 
-local function is_valid_enemy(unit)
-    if not unit or not Entity.IsAlive(unit) then
-        return false
+local function GetAbilityCharges(ability)
+    if not ability then
+        return nil
     end
-    if Entity.GetTeamNum(unit) == state.team then
-        return false
+
+    if Ability.GetCurrentAbilityCharges then
+        return Ability.GetCurrentAbilityCharges(ability)
     end
-    if NPC.IsCourier and NPC.IsCourier(unit) then
-        return false
+    if Ability.GetCurrentCharges then
+        return Ability.GetCurrentCharges(ability)
     end
-    return true
+    if Ability.GetRemainingCharges then
+        return Ability.GetRemainingCharges(ability)
+    end
+    if Ability.GetCharges then
+        return Ability.GetCharges(ability)
+    end
+
+    return nil
 end
 
-local function is_valid_friend(unit)
-    if not unit or not Entity.IsAlive(unit) then
-        return false
-    end
-    if Entity.GetTeamNum(unit) ~= state.team then
-        return false
-    end
-    if NPC.IsCourier and NPC.IsCourier(unit) then
-        return false
-    end
-    return true
-end
-
-local function should_control(unit)
-    if not unit or not Entity.IsAlive(unit) then
-        return false
-    end
-    if unit == state.hero then
-        return false
-    end
-    if NPC.IsIllusion and NPC.IsIllusion(unit) then
-        return false
-    end
-    if NPC.IsCourier and NPC.IsCourier(unit) then
-        return false
-    end
-    if NPC.IsWaitingToSpawn and NPC.IsWaitingToSpawn(unit) then
-        return false
-    end
-    if Entity.GetTeamNum(unit) ~= state.team then
-        return false
-    end
-
-    if state.player_id and state.player_id >= 0 then
-        if NPC.IsControllableByPlayer and NPC.IsControllableByPlayer(unit, state.player_id) then
-            return true
-        end
-        if Entity.IsControllableByPlayer and Entity.IsControllableByPlayer(unit, state.player_id) then
-            return true
-        end
-    end
-
-    if state.hero then
-        local owner = NPC.GetOwnerNPC and NPC.GetOwnerNPC(unit)
-        if owner and owner == state.hero then
-            return true
-        end
-    end
-
-    return false
-end
-
-local function order(unit, order_type, target, position, ability)
-    if not state.player or not Player or not Player.PrepareUnitOrders then
-        return
-    end
-    if not Enum or not Enum.UnitOrder or not Enum.PlayerOrderIssuer then
-        return
-    end
-
-    Player.PrepareUnitOrders(
-        state.player,
-        order_type,
-        target,
-        position,
-        ability,
-        Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY,
-        unit,
-        false,
-        false,
-        true
-    )
-end
-
-local function move_to(unit, position)
-    order(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION, nil, position, nil)
-end
-
-local function attack(unit, target)
-    order(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET, target, nil, nil)
-end
-
-local function cast_target(unit, ability, target)
-    if Ability and Ability.CastTarget then
-        Ability.CastTarget(ability, target)
-    else
-        order(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET, target, nil, ability)
-    end
-end
-
-local function cast_position(unit, ability, position)
-    if Ability and Ability.CastPosition then
-        Ability.CastPosition(ability, position)
-    else
-        order(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_POSITION, nil, position, ability)
-    end
-end
-
-local function cast_no_target(unit, ability)
-    if Ability and Ability.CastNoTarget then
-        Ability.CastNoTarget(ability)
-    else
-        order(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_NO_TARGET, nil, nil, ability)
-    end
-end
-
-local function ability_recently_used(ability, data)
-    if not data or not data.min_interval or not Ability or not Ability.SecondsSinceLastUse then
-        return false
-    end
-    local since = Ability.SecondsSinceLastUse(ability)
-    if not since or since < 0 then
-        return false
-    end
-    return since < data.min_interval
-end
-
-local function ability_ready(unit, ability, data)
+local function IsAbilityReady(unit, ability, metadata)
     if not ability then
         return false
     end
-    if Ability.GetLevel and Ability.GetLevel(ability) <= 0 then
-        return false
-    end
+
     if Ability.IsHidden and Ability.IsHidden(ability) then
         return false
     end
+
     if Ability.IsPassive and Ability.IsPassive(ability) then
         return false
     end
-    if ability_recently_used(ability, data) then
+
+    if Ability.GetLevel and Ability.GetLevel(ability) <= 0 then
         return false
+    end
+
+    local cooldown = Ability.GetCooldownTimeRemaining and Ability.GetCooldownTimeRemaining(ability) or 0
+    if cooldown > 0 then
+        return false
+    end
+
+    if metadata and metadata.requires_charges then
+        local charges = GetAbilityCharges(ability)
+        if not charges or charges <= 0 then
+            return false
+        end
+    end
+
+    if metadata and metadata.ignore_mana then
+        return Ability.IsReady(ability)
+    end
+
+    if Ability.IsCastable then
+        return Ability.IsCastable(ability, NPC.GetMana(unit))
     end
     if Ability.IsReady then
         return Ability.IsReady(ability)
     end
-    if Ability.IsCastable then
-        return Ability.IsCastable(ability, NPC.GetMana(unit))
+    return false
+end
+
+local function GetCastRange(unit, ability, metadata)
+    if metadata and metadata.range then
+        return metadata.range
+    end
+    local range = Ability.GetCastRange(ability)
+    if range and range > 0 then
+        if NPC.HasItem and NPC.HasItem(unit, "item_aether_lens", true) then
+            range = range + 225
+        end
+        if metadata and metadata.range_bonus then
+            range = range + metadata.range_bonus
+        end
+        return range
+    end
+    if metadata and metadata.range_bonus then
+        return 600 + metadata.range_bonus
+    end
+    return 600
+end
+
+local function IsValidEnemy(enemy)
+    if not enemy or not Entity.IsAlive(enemy) then
+        return false
+    end
+    if Entity.GetTeamNum(enemy) == runtime.team then
+        return false
+    end
+    if NPC.IsCourier(enemy) then
+        return false
+    end
+    return true
+end
+
+local function IsValidAlly(ally)
+    if not ally or not Entity.IsAlive(ally) then
+        return false
+    end
+    if Entity.GetTeamNum(ally) ~= runtime.team then
+        return false
+    end
+    return true
+end
+
+local function CountEnemiesAround(position, radius, metadata)
+    if not position then
+        return 0
+    end
+    local total = 0
+    local enemies = NPCs.InRadius(position, radius, runtime.team, Enum.TeamType.TEAM_ENEMY) or {}
+    for _, enemy in ipairs(enemies) do
+        if IsValidEnemy(enemy) then
+            if metadata and metadata.only_heroes and not NPC.IsHero(enemy) then
+                goto continue
+            end
+            total = total + 1
+        end
+        ::continue::
+    end
+
+    if metadata and metadata.allow_neutrals then
+        local neutrals = NPCs.InRadius(position, radius, runtime.team, Enum.TeamType.TEAM_NEUTRAL) or {}
+        for _, enemy in ipairs(neutrals) do
+            if Entity.IsAlive(enemy) then
+                total = total + 1
+            end
+        end
+    end
+    return total
+end
+
+local function FindEnemyTarget(unit, metadata, cast_range, anchor_position, focus_target)
+    if focus_target and IsValidEnemy(focus_target) then
+        local pos = Entity.GetAbsOrigin(focus_target)
+        local unit_pos = Entity.GetAbsOrigin(unit)
+        if pos and unit_pos and Distance(pos, unit_pos) <= cast_range + (metadata and metadata.range_bonus or 0) then
+            if not metadata or not metadata.only_heroes or NPC.IsHero(focus_target) then
+                return focus_target
+            end
+        end
+    end
+
+    local origin = Entity.GetAbsOrigin(unit)
+    local centers = {}
+    if origin then
+        table.insert(centers, origin)
+    end
+    if anchor_position then
+        table.insert(centers, anchor_position)
+    end
+
+    local best_target = nil
+    local best_score = -math.huge
+
+    for _, center in ipairs(centers) do
+        local enemies = NPCs.InRadius(center, cast_range + (metadata and metadata.range_bonus or 0), runtime.team, Enum.TeamType.TEAM_ENEMY) or {}
+        for _, enemy in ipairs(enemies) do
+            if IsValidEnemy(enemy) then
+                if metadata and metadata.only_heroes and not NPC.IsHero(enemy) then
+                    goto continue_enemy
+                end
+                local enemy_pos = Entity.GetAbsOrigin(enemy)
+                if enemy_pos then
+                    local distance = Distance(center, enemy_pos)
+                    if distance <= cast_range + (metadata and metadata.range_bonus or 0) then
+                        local score = -distance
+                        if NPC.IsHero(enemy) then
+                            score = score + 250
+                        end
+                        local idx = Entity.GetIndex(enemy)
+                        if runtime.threat_memory[idx] and runtime.threat_memory[idx] > GlobalVars.GetCurTime() then
+                            score = score + 120
+                        end
+                        if metadata and metadata.score then
+                            score = score + metadata.score
+                        end
+                        if score > best_score then
+                            best_score = score
+                            best_target = enemy
+                        end
+                    end
+                end
+            end
+            ::continue_enemy::
+        end
+        if metadata and metadata.allow_neutrals then
+            local neutrals = NPCs.InRadius(center, cast_range + (metadata.range_bonus or 0), runtime.team, Enum.TeamType.TEAM_NEUTRAL) or {}
+            for _, neutral in ipairs(neutrals) do
+                if Entity.IsAlive(neutral) then
+                    local neutral_pos = Entity.GetAbsOrigin(neutral)
+                    if neutral_pos then
+                        local distance = Distance(center, neutral_pos)
+                        if distance <= cast_range + (metadata and metadata.range_bonus or 0) then
+                            local score = -distance + (metadata and metadata.score or 0)
+                            if score > best_score then
+                                best_score = score
+                                best_target = neutral
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return best_target
+end
+
+local function FindAllyTarget(unit, metadata, cast_range, anchor_unit, anchor_position)
+    if metadata and metadata.prefer_hero and runtime.hero and IsValidAlly(runtime.hero) then
+        local hero_pos = Entity.GetAbsOrigin(runtime.hero)
+        local unit_pos = Entity.GetAbsOrigin(unit)
+        if hero_pos and unit_pos and Distance(hero_pos, unit_pos) <= cast_range + (metadata and metadata.range_bonus or 0) then
+            if not metadata.ally_max_health or (Entity.GetHealth(runtime.hero) / math.max(1, Entity.GetMaxHealth(runtime.hero))) <= metadata.ally_max_health then
+                if not metadata.avoid_modifier or not NPC.HasModifier(runtime.hero, metadata.avoid_modifier) then
+                    return runtime.hero
+                end
+            end
+        end
+    end
+
+    if anchor_unit and metadata and metadata.prefer_anchor and IsValidAlly(anchor_unit) then
+        local anchor_pos = anchor_position or Entity.GetAbsOrigin(anchor_unit)
+        local unit_pos = Entity.GetAbsOrigin(unit)
+        if anchor_pos and unit_pos and Distance(anchor_pos, unit_pos) <= cast_range + (metadata and metadata.range_bonus or 0) then
+            return anchor_unit
+        end
+    end
+
+    local unit_pos = Entity.GetAbsOrigin(unit)
+    if not unit_pos then
+        return nil
+    end
+
+    local best_target = nil
+    local best_score = -math.huge
+    local allies = NPCs.InRadius(unit_pos, cast_range + (metadata and metadata.range_bonus or 0), runtime.team, Enum.TeamType.TEAM_FRIEND) or {}
+    for _, ally in ipairs(allies) do
+        if IsValidAlly(ally) then
+            if metadata and metadata.include_self == false and ally == unit then
+                goto continue_ally
+            end
+            if metadata and metadata.avoid_modifier and NPC.HasModifier(ally, metadata.avoid_modifier) then
+                goto continue_ally
+            end
+            if metadata and metadata.ally_max_health then
+                local health = Entity.GetHealth(ally)
+                local max_health = Entity.GetMaxHealth(ally)
+                if max_health > 0 and health / max_health > metadata.ally_max_health then
+                    goto continue_ally
+                end
+            end
+            local ally_pos = Entity.GetAbsOrigin(ally)
+            if ally_pos then
+                local distance = Distance(unit_pos, ally_pos)
+                if distance <= cast_range + (metadata and metadata.range_bonus or 0) then
+                    local score = -distance
+                    if NPC.IsHero(ally) then
+                        score = score + 150
+                    end
+                    if metadata and metadata.score then
+                        score = score + metadata.score
+                    end
+                    if score > best_score then
+                        best_score = score
+                        best_target = ally
+                    end
+                end
+            end
+        end
+        ::continue_ally::
+    end
+
+    return best_target
+end
+
+local function CastAbility(unit, ability, metadata, target, position)
+    if metadata.behavior == "target" or metadata.behavior == "ally" then
+        if target then
+            if Ability.CastTarget then
+                Ability.CastTarget(ability, target)
+            else
+                SafeOrder(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET, target, nil)
+            end
+            return true
+        end
+    elseif metadata.behavior == "point" then
+        if position then
+            if Ability.CastPosition then
+                Ability.CastPosition(ability, position)
+            else
+                SafeOrder(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_POSITION, nil, position)
+            end
+            return true
+        end
+    elseif metadata.behavior == "no_target" then
+        if Ability.CastNoTarget then
+            Ability.CastNoTarget(ability)
+        else
+            SafeOrder(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_NO_TARGET, nil, nil)
+        end
+        return true
     end
     return false
 end
 
-local function ability_range(unit, ability, data)
-    if data and data.range then
-        return data.range
+local function ShouldCastNoTarget(unit, ability, metadata)
+    if metadata.always_cast then
+        return true
     end
-    if Ability.GetCastRange then
-        local ok, range = pcall(Ability.GetCastRange, ability)
-        if ok and type(range) == "number" and range > 0 then
-            if data and data.range_bonus then
-                range = range + data.range_bonus
-            end
-            return range
-        end
-    end
-    local base = 600
-    if data and data.range_bonus then
-        base = base + data.range_bonus
-    end
-    return base
-end
-
-local function enemies_near(center, radius, include_neutrals)
-    local result = {}
-    if not center then
-        return result
-    end
-
-    local enemies = NPCs and NPCs.InRadius and NPCs.InRadius(center, radius, state.team, Enum.TeamType.TEAM_ENEMY) or {}
-    for _, enemy in ipairs(enemies) do
-        if is_valid_enemy(enemy) then
-            table.insert(result, enemy)
-        end
-    end
-
-    if include_neutrals then
-        local neutrals = NPCs and NPCs.InRadius and NPCs.InRadius(center, radius, state.team, Enum.TeamType.TEAM_NEUTRAL) or {}
-        for _, enemy in ipairs(neutrals) do
-            if is_valid_enemy(enemy) then
-                table.insert(result, enemy)
-            end
-        end
-    end
-
-    return result
-end
-
-local function select_enemy(unit, data, range, hero_pos)
+    local radius = metadata.radius or Ability.GetAOERadius(ability) or 250
     local unit_pos = Entity.GetAbsOrigin(unit)
-    local anchors = {}
-    if unit_pos then
-        table.insert(anchors, unit_pos)
+    if not unit_pos then
+        return false
     end
-    if hero_pos then
-        table.insert(anchors, hero_pos)
+    local enemies = CountEnemiesAround(unit_pos, radius, metadata)
+    local threshold = metadata.min_enemies or 1
+    return enemies >= threshold
+end
+
+local function TryCastAbility(unit, agent, now, ability, metadata, anchor_position, focus_target)
+    if not IsAbilityReady(unit, ability, metadata) then
+        return false
     end
 
-    local best_target
+    agent.last_cast = agent.last_cast or {}
+    local ability_name = Ability.GetName(ability)
+    local next_allowed = agent.last_cast[ability_name] or 0
+    if now < next_allowed then
+        return false
+    end
+
+    local cast_range = GetCastRange(unit, ability, metadata)
+    local success = false
+
+    if metadata.behavior == "target" then
+        local target = FindEnemyTarget(unit, metadata, cast_range, anchor_position, focus_target)
+        if target then
+            success = CastAbility(unit, ability, metadata, target, Entity.GetAbsOrigin(target))
+        end
+    elseif metadata.behavior == "point" then
+        local target = FindEnemyTarget(unit, metadata, cast_range, anchor_position, focus_target)
+        local pos = target and Entity.GetAbsOrigin(target)
+        if metadata.always_cast and not pos then
+            pos = Entity.GetAbsOrigin(unit)
+        end
+        if pos then
+            success = CastAbility(unit, ability, metadata, nil, pos)
+        end
+    elseif metadata.behavior == "ally" then
+        local ally = FindAllyTarget(unit, metadata, cast_range, runtime.hero, anchor_position)
+        if ally then
+            success = CastAbility(unit, ability, metadata, ally, Entity.GetAbsOrigin(ally))
+        end
+    elseif metadata.behavior == "no_target" then
+        if ShouldCastNoTarget(unit, ability, metadata) then
+            success = CastAbility(unit, ability, metadata)
+        end
+    end
+
+    if success then
+        agent.state = STATES.CASTING
+        agent.last_action = "cast " .. ability_name
+        agent.next_order = now + runtime.config.order_cooldown
+        agent.last_cast[ability_name] = now + (metadata.min_interval or runtime.config.cast_cooldown)
+        return true
+    end
+
+    return false
+end
+
+local function TryCastAbilities(unit, agent, now, anchor_position, focus_target)
+    for slot = 0, 23 do
+        local ability = NPC.GetAbilityByIndex(unit, slot)
+        if ability then
+            local name = Ability.GetName(ability)
+            local metadata = ABILITY_DATA[name]
+            if metadata then
+                if TryCastAbility(unit, agent, now, ability, metadata, anchor_position, focus_target) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+SafeOrder = function(unit, order, target, position)
+    local player = AcquirePlayer()
+    if not player then
+        return
+    end
+    Player.PrepareUnitOrders(
+        player,
+        order,
+        target,
+        position,
+        nil,
+        Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY,
+        unit
+    )
+end
+
+local function Attack(unit, agent, target, now)
+    SafeOrder(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET, target, nil)
+    agent.state = STATES.CHASE
+    agent.last_action = "attack"
+    agent.next_order = now + runtime.config.order_cooldown
+    agent.current_target = target
+end
+
+local function MoveTo(unit, agent, position, now)
+    SafeOrder(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION, nil, position)
+    agent.state = STATES.FOLLOW
+    agent.last_action = "follow"
+    agent.next_order = now + runtime.config.order_cooldown
+end
+
+local function Hold(unit, agent, now)
+    SafeOrder(unit, Enum.UnitOrder.DOTA_UNIT_ORDER_HOLD_POSITION, nil, Entity.GetAbsOrigin(unit))
+    agent.state = STATES.HOLD
+    agent.last_action = "hold"
+    agent.next_order = now + runtime.config.order_cooldown
+end
+
+local function AcquireAttackTarget(unit, anchor_position, focus_target)
+    if focus_target and IsValidEnemy(focus_target) then
+        local pos = Entity.GetAbsOrigin(focus_target)
+        local unit_pos = Entity.GetAbsOrigin(unit)
+        if pos and unit_pos and Distance(pos, unit_pos) <= runtime.config.attack_radius + 200 then
+            return focus_target
+        end
+    end
+
+    local best_target = nil
     local best_score = -math.huge
+    local origin = Entity.GetAbsOrigin(unit)
+    local centers = {}
+    if origin then
+        table.insert(centers, origin)
+    end
+    if anchor_position then
+        table.insert(centers, anchor_position)
+    end
 
-    for _, anchor in ipairs(anchors) do
-        local targets = enemies_near(anchor, range, data and data.allow_neutrals)
-        for _, enemy in ipairs(targets) do
-            if not data or not data.only_heroes or NPC.IsHero(enemy) then
+    for _, center in ipairs(centers) do
+        local enemies = NPCs.InRadius(center, runtime.config.attack_radius, runtime.team, Enum.TeamType.TEAM_ENEMY) or {}
+        for _, enemy in ipairs(enemies) do
+            if IsValidEnemy(enemy) then
                 local enemy_pos = Entity.GetAbsOrigin(enemy)
                 if enemy_pos then
-                    local distance = unit_pos and unit_pos:Distance(enemy_pos) or anchor:Distance(enemy_pos)
-                    if distance <= range + 50 then
-                        local score = 0
-                        if NPC.IsHero and NPC.IsHero(enemy) then
+                    local distance = Distance(center, enemy_pos)
+                    if distance <= runtime.config.attack_radius then
+                        local score = -distance
+                        if NPC.IsHero(enemy) then
                             score = score + 400
                         end
-                        if NPC.IsTower and NPC.IsTower(enemy) then
-                            score = score + 120
+                        local idx = Entity.GetIndex(enemy)
+                        if runtime.threat_memory[idx] and runtime.threat_memory[idx] > GlobalVars.GetCurTime() then
+                            score = score + 200
                         end
-                        score = score - distance * 0.5
                         if score > best_score then
                             best_score = score
                             best_target = enemy
@@ -525,189 +951,110 @@ local function select_enemy(unit, data, range, hero_pos)
     return best_target
 end
 
-local function select_ally(unit, data, range, hero)
-    local unit_pos = Entity.GetAbsOrigin(unit)
-    if not unit_pos then
-        return nil
+local function ShouldManage(unit)
+    if not unit or not Entity.IsAlive(unit) then
+        return false
     end
-
-    local best
-    local best_score = -math.huge
-
-    local function consider(candidate)
-        if not is_valid_friend(candidate) then
-            return
-        end
-        if candidate == unit and data and data.include_self == false then
-            return
-        end
-        if data and data.only_heroes and (not NPC.IsHero(candidate)) then
-            return
-        end
-        local pos = Entity.GetAbsOrigin(candidate)
-        if not pos or unit_pos:Distance(pos) > range then
-            return
-        end
-        if data and data.avoid_modifier and NPC.HasModifier and NPC.HasModifier(candidate, data.avoid_modifier) then
-            return
-        end
-        local hp = Entity.GetHealth(candidate)
-        local max_hp = Entity.GetMaxHealth(candidate)
-        local hp_pct = 1
-        if hp and max_hp and max_hp > 0 then
-            hp_pct = hp / max_hp
-        end
-        if data and data.ally_max_hp and hp_pct > data.ally_max_hp then
-            return
-        end
-        if data and data.ally_min_hp and hp_pct < data.ally_min_hp then
-            return
-        end
-        local score = -hp_pct * 100
-        if NPC.IsHero and NPC.IsHero(candidate) then
-            score = score + 200
-        end
-        if hero and candidate == hero then
-            score = score + 150
-        end
-        if data and data.prefer_hero and hero and candidate == hero then
-            score = score + 200
-        end
-        if score > best_score then
-            best_score = score
-            best = candidate
-        end
+    if runtime.hero and unit == runtime.hero then
+        return false
     end
-
-    if data and data.prefer_hero and hero then
-        consider(hero)
+    if NPC.IsCourier(unit) then
+        return false
     end
-
-    local allies = NPCs and NPCs.InRadius and NPCs.InRadius(unit_pos, range, state.team, Enum.TeamType.TEAM_FRIEND) or {}
-    for _, ally in ipairs(allies) do
-        consider(ally)
+    if Entity.GetTeamNum(unit) ~= runtime.team then
+        return false
     end
-
-    return best
-end
-
-local function should_cast_no_target(unit, ability, data)
-    if data and data.always then
+    if runtime.player_id and NPC.IsControllableByPlayer and NPC.IsControllableByPlayer(unit, runtime.player_id) then
         return true
     end
-
-    local radius = data and data.radius or (Ability and Ability.GetAOERadius and Ability.GetAOERadius(ability)) or 275
-    local unit_pos = Entity.GetAbsOrigin(unit)
-    if not unit_pos then
-        return false
+    if Entity.GetOwner and Entity.GetOwner(unit) == runtime.hero then
+        return true
     end
-
-    local targets = enemies_near(unit_pos, radius, data and data.allow_neutrals)
-    local required = 1
-    if data and data.min_enemies then
-        required = data.min_enemies
-    end
-
-    return #targets >= required
-end
-
-local function try_cast(unit, info, ability, data, now, hero_pos)
-    if not ability_ready(unit, ability, data) then
-        return false
-    end
-
-    local ability_type = data and data.type
-    if ability_type == "target" then
-        local range = ability_range(unit, ability, data)
-        local target = select_enemy(unit, data, range, hero_pos)
-        if target then
-            cast_target(unit, ability, target)
-            info.next_action = now + CAST_COOLDOWN
-            info.current_target = target
-            return true
-        end
-    elseif ability_type == "point" then
-        local range = ability_range(unit, ability, data)
-        local target = select_enemy(unit, data, range, hero_pos)
-        local position = target and Entity.GetAbsOrigin(target)
-        if position then
-            cast_position(unit, ability, position)
-            info.next_action = now + CAST_COOLDOWN
-            info.current_target = target
-            return true
-        end
-    elseif ability_type == "ally" then
-        local range = ability_range(unit, ability, data)
-        local ally = select_ally(unit, data, range, state.hero)
-        if ally then
-            cast_target(unit, ability, ally)
-            info.next_action = now + CAST_COOLDOWN
-            return true
-        end
-    elseif ability_type == "no_target" then
-        if should_cast_no_target(unit, ability, data) then
-            cast_no_target(unit, ability)
-            info.next_action = now + CAST_COOLDOWN
-            return true
-        end
-    end
-
     return false
 end
 
-local function process_abilities(unit, info, now, hero_pos)
-    if NPC.IsSilenced and NPC.IsSilenced(unit) then
-        return false
-    end
-    if NPC.IsStunned and NPC.IsStunned(unit) then
-        return false
-    end
-    if NPC.IsChannellingAbility and NPC.IsChannellingAbility(unit) then
-        return false
+local function ProcessAgent(agent, now)
+    local unit = agent.unit
+    if not unit or not Entity.IsAlive(unit) then
+        return
     end
 
-    for slot = 0, 23 do
-        local ability = NPC.GetAbilityByIndex and NPC.GetAbilityByIndex(unit, slot)
-        if not ability then
-            break
-        end
-        local name = Ability and Ability.GetName and Ability.GetName(ability)
-        if name then
-            local data = ability_data[name]
-            if data and try_cast(unit, info, ability, data, now, hero_pos) then
-                return true
+    if agent.manual_until and agent.manual_until > now then
+        agent.state = STATES.MANUAL
+        agent.last_action = "manual"
+        return
+    end
+
+    if agent.next_order and agent.next_order > now then
+        return
+    end
+
+    local anchor_pos = runtime.hero and Entity.GetAbsOrigin(runtime.hero) or nil
+    local focus_target = runtime.focus_target
+
+    if TryCastAbilities(unit, agent, now, anchor_pos, focus_target) then
+        return
+    end
+
+    if agent.current_target and (not IsValidEnemy(agent.current_target) or Distance(Entity.GetAbsOrigin(agent.current_target), Entity.GetAbsOrigin(unit)) > runtime.config.attack_radius * 1.5) then
+        agent.current_target = nil
+    end
+
+    local target = AcquireAttackTarget(unit, anchor_pos, focus_target)
+    if target then
+        Attack(unit, agent, target, now)
+        return
+    end
+
+    if anchor_pos then
+        local unit_pos = Entity.GetAbsOrigin(unit)
+        if unit_pos then
+            local distance = Distance(unit_pos, anchor_pos)
+            if distance > runtime.config.follow_distance then
+                MoveTo(unit, agent, anchor_pos, now)
+            else
+                Hold(unit, agent, now)
             end
         end
+    else
+        Hold(unit, agent, now)
     end
-
-    return false
 end
 
-local function select_attack_target(unit, info, hero_pos)
-    local unit_pos = Entity.GetAbsOrigin(unit)
+local function TrackFocusTarget(now)
+    if not runtime.hero then
+        runtime.focus_target = nil
+        return
+    end
+    if runtime.focus_target and (not IsValidEnemy(runtime.focus_target) or Distance(Entity.GetAbsOrigin(runtime.focus_target), Entity.GetAbsOrigin(runtime.hero)) > runtime.config.attack_radius * 1.6) then
+        runtime.focus_target = nil
+    end
+    if runtime.focus_target then
+        return
+    end
+    if now - runtime.last_focus_check < 0.25 then
+        return
+    end
+    runtime.last_focus_check = now
+    local hero_pos = Entity.GetAbsOrigin(runtime.hero)
+    if not hero_pos then
+        return
+    end
+    local enemies = NPCs.InRadius(hero_pos, runtime.config.attack_radius, runtime.team, Enum.TeamType.TEAM_ENEMY) or {}
     local best
     local best_score = -math.huge
-    local centers = {}
-
-    if unit_pos then
-        table.insert(centers, unit_pos)
-    end
-    if hero_pos then
-        table.insert(centers, hero_pos)
-    end
-
-    for _, center in ipairs(centers) do
-        local enemies = enemies_near(center, ATTACK_RADIUS, true)
-        for _, enemy in ipairs(enemies) do
+    for _, enemy in ipairs(enemies) do
+        if IsValidEnemy(enemy) then
             local enemy_pos = Entity.GetAbsOrigin(enemy)
             if enemy_pos then
-                local distance = unit_pos and unit_pos:Distance(enemy_pos) or center:Distance(enemy_pos)
+                local distance = Distance(hero_pos, enemy_pos)
                 local score = -distance
-                if NPC.IsHero and NPC.IsHero(enemy) then
-                    score = score + 400
+                if NPC.IsHero(enemy) then
+                    score = score + 300
                 end
-                if info.current_target and enemy == info.current_target then
-                    score = score + 80
+                local idx = Entity.GetIndex(enemy)
+                if runtime.threat_memory[idx] and runtime.threat_memory[idx] > GlobalVars.GetCurTime() then
+                    score = score + 180
                 end
                 if score > best_score then
                     best_score = score
@@ -716,203 +1063,219 @@ local function select_attack_target(unit, info, hero_pos)
             end
         end
     end
-
-    return best
+    runtime.focus_target = best
 end
 
-local function process_unit(unit, info, now, hero_pos)
-    local handle = Entity.GetIndex(unit)
-    local lock = state.manual_lock[handle]
-    if lock and lock > now then
+local function TryDominate(now)
+    if not runtime.config.auto_dominate then
+        return
+    end
+    if not runtime.hero or not Entity.IsAlive(runtime.hero) then
         return
     end
 
-    if info.next_action and info.next_action > now then
+    if not NPC.GetItemByIndex then
         return
     end
 
-    if process_abilities(unit, info, now, hero_pos) then
-        return
-    end
-
-    if info.current_target and (not Entity.IsAlive(info.current_target) or Entity.GetTeamNum(info.current_target) == state.team) then
-        info.current_target = nil
-    end
-
-    local target = select_attack_target(unit, info, hero_pos)
-    if target then
-        if info.current_target ~= target then
-            attack(unit, target)
-            info.current_target = target
-            info.next_action = now + ORDER_COOLDOWN
-        end
-        return
-    end
-
-    if not hero_pos then
-        return
-    end
-
-    local unit_pos = Entity.GetAbsOrigin(unit)
-    if not unit_pos then
-        return
-    end
-
-    local distance = unit_pos:Distance(hero_pos)
-    if distance > FOLLOW_DISTANCE then
-        move_to(unit, hero_pos)
-        info.next_action = now + ORDER_COOLDOWN
-    end
-end
-
-local function dominator_target(hero, item)
-    if not hero or not item then
-        return nil
-    end
-    local hero_pos = Entity.GetAbsOrigin(hero)
-    if not hero_pos then
-        return nil
-    end
-
-    local range = ability_range(hero, item, { range_bonus = 0 })
-    if range < 700 then
-        range = 700
-    end
-    local units = NPCs and NPCs.InRadius and NPCs.InRadius(hero_pos, range + 50, state.team, Enum.TeamType.TEAM_NEUTRAL) or {}
-    local best
-    local best_score = -math.huge
-    local allow_ancients = Ability and Ability.GetName and Ability.GetName(item) == "item_helm_of_the_overlord"
-
-    for _, neutral in ipairs(units) do
-        if Entity.IsAlive(neutral) and (not NPC.IsWaitingToSpawn or not NPC.IsWaitingToSpawn(neutral)) then
-            local name = Entity.GetUnitName(neutral)
-            local score = DOMINATOR_PRIORITY[name]
-            if score then
-                local is_ancient = ANCIENT_NEUTRALS[name] or false
-                if not is_ancient or allow_ancients then
-                    if not NPC.HasModifier or not NPC.HasModifier(neutral, "modifier_helm_of_the_dominator") then
-                        if not NPC.HasModifier or not NPC.HasModifier(neutral, "modifier_helm_of_the_overlord") then
-                            if score > best_score then
-                                best = neutral
-                                best_score = score
+    for slot = 0, 8 do
+        local item = NPC.GetItemByIndex(runtime.hero, slot)
+        if item then
+            local name = Ability.GetName(item)
+            if DOMINATOR_ITEMS[name] then
+                if Ability.IsCastable(item, NPC.GetMana(runtime.hero)) and Ability.GetCooldownTimeRemaining(item) <= 0 then
+                    local cast_range = Ability.GetCastRange(item)
+                    cast_range = cast_range > 0 and cast_range or DEFAULTS.dominator_range
+                    local hero_pos = Entity.GetAbsOrigin(runtime.hero)
+                    if hero_pos then
+                        local best_target
+                        local best_score = -math.huge
+                        local neutrals = NPCs.InRadius(hero_pos, cast_range, runtime.team, Enum.TeamType.TEAM_NEUTRAL) or {}
+                        for _, neutral in ipairs(neutrals) do
+                            local is_ancient = NPC.IsAncient and NPC.IsAncient(neutral)
+                            if Entity.IsAlive(neutral) and not is_ancient then
+                                local name_neutral = NPC.GetUnitName(neutral)
+                                local priority = DOMINATOR_PRIORITY[name_neutral] or 0
+                                if priority > best_score then
+                                    best_score = priority
+                                    best_target = neutral
+                                end
+                            elseif name == "item_helm_of_the_overlord" and Entity.IsAlive(neutral) and is_ancient then
+                                local name_neutral = NPC.GetUnitName(neutral)
+                                local priority = DOMINATOR_PRIORITY[name_neutral] or (ANCIENT_UNITS[name_neutral] and 350 or 0)
+                                if priority > best_score then
+                                    best_score = priority
+                                    best_target = neutral
+                                end
                             end
+                        end
+                        if best_target then
+                            Ability.CastTarget(item, best_target)
+                            return
                         end
                     end
                 end
             end
         end
     end
-
-    return best
 end
 
-local function auto_dominate(now)
-    if not state.hero then
-        return
-    end
-
-    if now < state.last_dominate_attempt + 0.35 then
-        return
-    end
-
-    local item
-    for _, name in ipairs(DOMINATOR_ITEMS) do
-        item = NPC.GetItem and NPC.GetItem(state.hero, name, true)
-        if item and ability_ready(state.hero, item, nil) then
-            break
-        end
-        item = nil
-    end
-
-    if not item then
-        return
-    end
-
-    local target = dominator_target(state.hero, item)
-    if target then
-        cast_target(state.hero, item, target)
-        state.last_dominate_attempt = now
-    else
-        state.last_dominate_attempt = now
-    end
-end
-
-function commander.OnUpdate()
-    if not Engine or not Engine.IsInGame or not Engine.IsInGame() then
-        reset_state()
-        return
-    end
-
-    if not ensure_hero() then
-        return
-    end
-
-    ensure_player()
-
-    local now = current_time()
-    auto_dominate(now)
-
-    local hero_pos = state.hero and Entity.GetAbsOrigin(state.hero) or nil
-    local tracked = {}
-
-    for _, unit in ipairs(NPCs and NPCs.GetAll and NPCs.GetAll() or {}) do
-        if should_control(unit) then
-            local handle = Entity.GetIndex(unit)
-            local info = state.units[handle]
-            if not info then
-                info = {
+local function RefreshAgents(now)
+    local next_agents = {}
+    for _, unit in ipairs(NPCs.GetAll()) do
+        if ShouldManage(unit) then
+            local idx = Entity.GetIndex(unit)
+            local agent = runtime.agents[idx]
+            if not agent then
+                agent = {
                     unit = unit,
-                    current_target = nil,
-                    next_action = 0,
+                    next_order = 0,
+                    manual_until = 0,
+                    state = STATES.FOLLOW,
+                    last_action = "spawn",
                 }
             end
-            info.unit = unit
-            tracked[handle] = info
-            process_unit(unit, info, now, hero_pos)
+            agent.unit = unit
+            next_agents[idx] = agent
+            ProcessAgent(agent, now)
         end
     end
+    runtime.agents = next_agents
+end
 
-    state.units = tracked
-
-    for handle, expiry in pairs(state.manual_lock) do
-        if expiry <= now then
-            state.manual_lock[handle] = nil
-        end
+local function FlagManual(unit)
+    if not unit then
+        return
+    end
+    local idx = Entity.GetIndex(unit)
+    local agent = runtime.agents[idx]
+    if agent then
+        agent.manual_until = GlobalVars.GetCurTime() + runtime.config.manual_lock
+        agent.state = STATES.MANUAL
+        agent.last_action = "manual"
     end
 end
 
 function commander.OnPrepareUnitOrders(data)
-    if not data or not data.npc then
+    if not MenuEnabled() then
         return true
     end
-    if not Engine or not Engine.IsInGame or not Engine.IsInGame() then
-        return true
-    end
-    if not Entity or not Entity.GetIndex then
+    ReadConfig()
+
+    if not UpdateHeroContext() then
         return true
     end
 
-    local now = current_time()
-    local handle = Entity.GetIndex(data.npc)
-    state.manual_lock[handle] = now + MANUAL_SUPPRESSION
+    if data.orderIssuer == Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_HERO_ONLY and data.order == Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET then
+        runtime.focus_target = data.target
+    end
 
-    if data.issuerNpc then
-        if type(data.issuerNpc) == "table" then
-            for _, unit in ipairs(data.issuerNpc) do
-                if unit then
-                    state.manual_lock[Entity.GetIndex(unit)] = now + MANUAL_SUPPRESSION
-                end
+    if data.orderIssuer == Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY then
+        if data.npc then
+            FlagManual(data.npc)
+        end
+        return true
+    end
+
+    local player = AcquirePlayer()
+    if not player then
+        return true
+    end
+
+    if Player and Player.GetSelectedUnits then
+        local selected = Player.GetSelectedUnits(player)
+        if selected then
+            for _, unit in ipairs(selected) do
+                FlagManual(unit)
             end
-        else
-            state.manual_lock[Entity.GetIndex(data.issuerNpc)] = now + MANUAL_SUPPRESSION
         end
     end
-
     return true
 end
 
+function commander.OnEntityHurt(data)
+    if not MenuEnabled() then
+        return
+    end
+    if not data or not data.target then
+        return
+    end
+    if runtime.hero and data.target == runtime.hero and data.entindex_attacker then
+        runtime.threat_memory[data.entindex_attacker] = GlobalVars.GetCurTime() + 3
+    end
+end
+
+function commander.OnUpdate()
+    if not Engine.IsInGame() then
+        ResetRuntime()
+        return
+    end
+
+    if not MenuEnabled() then
+        ResetRuntime()
+        return
+    end
+
+    ReadConfig()
+
+    if not UpdateHeroContext() then
+        return
+    end
+
+    local now = GlobalVars.GetCurTime()
+    TrackFocusTarget(now)
+    TryDominate(now)
+    RefreshAgents(now)
+end
+
+function commander.OnDraw()
+    if not runtime.config or not runtime.config.debug then
+        return
+    end
+    if not Renderer or not Renderer.LoadFont then
+        return
+    end
+    if not commander.debug_font then
+        commander.debug_font = Renderer.LoadFont("Tahoma", 16, Enum.FontCreate.FONTFLAG_OUTLINE)
+    end
+    local font = commander.debug_font
+    for _, agent in pairs(runtime.agents) do
+        local unit = agent.unit
+        if unit and Entity.IsAlive(unit) then
+            local origin = Entity.GetAbsOrigin(unit)
+            local offset = NPC.GetHealthBarOffset(unit) or 0
+            if origin then
+                local draw_pos = origin
+                if Vector then
+                    draw_pos = origin + Vector(0, 0, offset + 40)
+                end
+                local screen_pos, visible = Renderer.WorldToScreen(draw_pos)
+                if visible then
+                    local r, g, b = 180, 220, 255
+                    if agent.state == STATES.CASTING then
+                        r, g, b = 255, 160, 100
+                    elseif agent.state == STATES.MANUAL then
+                        r, g, b = 255, 210, 90
+                    elseif agent.state == STATES.CHASE then
+                        r, g, b = 255, 80, 80
+                    end
+                    local text = string.format("[%s] %s", agent.state or "?", agent.last_action or "")
+                    local width, height = 0, 0
+                    if Renderer.MeasureText then
+                        width, height = Renderer.MeasureText(font, text)
+                    else
+                        width = #text * 7
+                        height = 16
+                    end
+                    Renderer.DrawText(font, screen_pos.x - width / 2, screen_pos.y, r, g, b, 255, text)
+                end
+            end
+        end
+    end
+end
+
 function commander.OnGameEnd()
-    reset_state()
+    ResetRuntime()
 end
 
 return commander
