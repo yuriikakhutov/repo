@@ -3,152 +3,147 @@
 local keyboard_move = {}
 
 local menu_root = Menu.Create("Miscellaneous", "In Game", "Keyboard Move")
-local menu_group = menu_root:Create("Main"):Create("Keyboard Move")
+local menu = menu_root:Create("Main"):Create("Keyboard Move")
 
 local ui = {
-    enabled = menu_group:Switch("Включить WASD-передвижение", true, "\u{f11c}"),
-    hold = menu_group:Switch("Повторять приказ при удержании", true),
-    distance = menu_group:Slider("Базовая дистанция направления", 150, 900, 380, "%d"),
-    lead = menu_group:Slider("Дополнительный запас вперёд", 0, 600, 140, "%d"),
-    interval = menu_group:Slider("Интервал повторных приказов (мс)", 40, 400, 120, "%d"),
-    respect_state = menu_group:Switch("Не перебивать во время стана/канала", true),
+    enabled = menu:Switch("Включить управление WASD", true, "\u{f11c}"),
+    distance = menu:Slider("Дистанция шага (юниты)", 100, 900, 420, "%d"),
+    lead = menu:Slider("Дополнительный запас", 0, 600, 160, "%d"),
+    interval = menu:Slider("Повтор приказа при удержании (мс)", 50, 400, 120, "%d"),
+    stop_on_release = menu:Switch("Останавливать при отпускании", true),
 }
 
-local KEY_BINDINGS = {
-    forward = Enum.ButtonCode.KEY_W,
-    back = Enum.ButtonCode.KEY_S,
-    left = Enum.ButtonCode.KEY_A,
-    right = Enum.ButtonCode.KEY_D,
-}
-
-local KEY_LIST = {
+local KEY_ORDER = {
     Enum.ButtonCode.KEY_W,
-    Enum.ButtonCode.KEY_S,
     Enum.ButtonCode.KEY_A,
+    Enum.ButtonCode.KEY_S,
     Enum.ButtonCode.KEY_D,
 }
 
-local ORDER_IDENTIFIER = "keyboard_wasd_move"
-
-local state = {
-    next_order_time = 0,
-    last_input_direction = nil,
-    last_order_direction = nil,
-    wait_release = false,
+local KEY_DIRECTIONS = {
+    [Enum.ButtonCode.KEY_W] = Vector(0, -1, 0), -- вверх по карте (север)
+    [Enum.ButtonCode.KEY_S] = Vector(0, 1, 0),  -- вниз (юг)
+    [Enum.ButtonCode.KEY_A] = Vector(-1, 0, 0), -- влево (запад)
+    [Enum.ButtonCode.KEY_D] = Vector(1, 0, 0),  -- вправо (восток)
 }
 
-local function any_key_pressed_once()
-    for i = 1, #KEY_LIST do
-        if Input.IsKeyDownOnce(KEY_LIST[i]) then
-            return true
-        end
-    end
+local ORDER_IDENTIFIER = "keyboard_move_wasd"
 
-    return false
-end
+local state = {
+    last_direction = nil,
+    next_order_time = 0,
+    moving = false,
+}
 
-local function collect_selected_units(player)
+local function gather_selected(player)
     local selected = Player.GetSelectedUnits(player)
     if not selected or #selected == 0 then
         return nil, nil
     end
 
-    local alive = {}
-    local player_id = Player.GetPlayerID(player)
+    local valid = {}
     for i = 1, #selected do
         local unit = selected[i]
-        if
-            Entity.IsNPC(unit)
-            and Entity.IsAlive(unit)
-            and (not player_id or Entity.IsControllableByPlayer(unit, player_id))
-        then
-            alive[#alive + 1] = unit
+        if Entity.IsNPC(unit) and Entity.IsAlive(unit) then
+            valid[#valid + 1] = unit
         end
     end
 
-    if #alive == 0 then
+    if #valid == 0 then
         return nil, nil
     end
 
     local hero = Heroes.GetLocal()
     if hero then
         local hero_index = Entity.GetIndex(hero)
-        for i = 1, #alive do
-            if Entity.GetIndex(alive[i]) == hero_index then
-                return alive, alive[i]
+        for i = 1, #valid do
+            if Entity.GetIndex(valid[i]) == hero_index then
+                return valid, valid[i]
             end
         end
     end
 
-    return alive, alive[1]
+    return valid, valid[1]
 end
 
-local function build_direction()
-    local direction = Vector()
-    local any_down = false
+local function current_direction()
+    local dir = Vector(0, 0, 0)
+    local pressed = false
 
-    if Input.IsKeyDown(KEY_BINDINGS.forward) then
-        direction = direction + Vector(0, 1, 0)
-        any_down = true
-    end
-    if Input.IsKeyDown(KEY_BINDINGS.back) then
-        direction = direction + Vector(0, -1, 0)
-        any_down = true
-    end
-    if Input.IsKeyDown(KEY_BINDINGS.right) then
-        direction = direction + Vector(1, 0, 0)
-        any_down = true
-    end
-    if Input.IsKeyDown(KEY_BINDINGS.left) then
-        direction = direction + Vector(-1, 0, 0)
-        any_down = true
+    for i = 1, #KEY_ORDER do
+        local key = KEY_ORDER[i]
+        if Input.IsKeyDown(key) then
+            dir = dir + KEY_DIRECTIONS[key]
+            pressed = true
+        end
     end
 
-    if not any_down then
-        return nil, false
+    if not pressed then
+        return nil
     end
 
-    direction.z = 0
-    if direction:Length2D() == 0 then
-        return nil, true
+    dir.z = 0
+    if dir:Length2D() == 0 then
+        return nil
     end
 
-    direction = direction:Normalized()
-    return direction, true
+    return dir:Normalized()
 end
 
-local function can_issue(reference)
-    if not reference or not Entity.IsAlive(reference) then
-        return false
-    end
-
-    if ui.respect_state:Get() and (NPC.IsStunned(reference) or NPC.IsChannellingAbility(reference)) then
-        return false
-    end
-
-    return true
-end
-
-local function adjust_target(reference_pos, direction, distance)
-    local target = reference_pos + direction:Scaled(distance)
-    if GridNav.IsTraversableFromTo(reference_pos, target, false, nil) then
-        return target
+local function adjust_target(origin, direction, distance)
+    local desired = origin + direction:Scaled(distance)
+    if GridNav.IsTraversableFromTo(origin, desired, false, nil) then
+        return desired
     end
 
     local step = distance
-    for _ = 1, 4 do
+    for _ = 1, 5 do
         step = step * 0.5
         if step < 25 then
             break
         end
 
-        target = reference_pos + direction:Scaled(step)
-        if GridNav.IsTraversableFromTo(reference_pos, target, false, nil) then
-            return target
+        local candidate = origin + direction:Scaled(step)
+        if GridNav.IsTraversableFromTo(origin, candidate, false, nil) then
+            return candidate
         end
     end
 
     return nil
+end
+
+local function issue_move(player, units, target)
+    Player.PrepareUnitOrders(
+        player,
+        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+        nil,
+        target,
+        nil,
+        Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
+        units,
+        false,
+        false,
+        false,
+        false,
+        ORDER_IDENTIFIER
+    )
+end
+
+local function issue_stop(player, units)
+    Player.PrepareUnitOrders(
+        player,
+        Enum.UnitOrder.DOTA_UNIT_ORDER_STOP,
+        nil,
+        nil,
+        nil,
+        Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
+        units,
+        false,
+        false,
+        false,
+        false,
+        ORDER_IDENTIFIER
+    )
 end
 
 function keyboard_move.OnUpdate()
@@ -165,107 +160,67 @@ function keyboard_move.OnUpdate()
         return
     end
 
-    local issuers, reference = collect_selected_units(player)
-    if not issuers or not reference then
-        state.last_input_direction = nil
-        state.last_order_direction = nil
+    local units, reference = gather_selected(player)
+    if not units or not reference then
+        state.last_direction = nil
         state.next_order_time = 0
-        state.wait_release = false
+        state.moving = false
         return
     end
 
-    if not can_issue(reference) then
+    if NPC.IsChannellingAbility(reference) or NPC.IsStunned(reference) then
         state.next_order_time = 0
         return
     end
 
-    local direction, has_active_key = build_direction()
-    if not direction then
-        if ui.hold:Get() and state.last_order_direction and not has_active_key then
-            Player.PrepareUnitOrders(
-                player,
-                Enum.UnitOrder.DOTA_UNIT_ORDER_STOP,
-                nil,
-                nil,
-                nil,
-                Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
-                issuers,
-                false,
-                false,
-                false,
-                false,
-                ORDER_IDENTIFIER
-            )
-        end
-
-        state.last_input_direction = nil
-        state.last_order_direction = nil
-        state.next_order_time = 0
-        state.wait_release = false
-        return
-    end
-
+    local direction = current_direction()
     local now = GlobalVars.GetCurTime()
-    local should_issue = false
 
-    if ui.hold:Get() then
-        if not state.last_input_direction or now >= state.next_order_time then
-            should_issue = true
-        elseif state.last_input_direction and direction:Dot2D(state.last_input_direction) < 0.995 then
-            should_issue = true
+    if not direction then
+        if state.moving and ui.stop_on_release:Get() then
+            issue_stop(player, units)
         end
-    else
-        if state.wait_release then
-            if not has_active_key then
-                state.wait_release = false
-            end
-        elseif any_key_pressed_once() then
-            should_issue = true
-            state.wait_release = true
-        end
-    end
-
-    if not should_issue then
+        state.moving = false
+        state.last_direction = nil
+        state.next_order_time = 0
         return
     end
 
-    local reference_pos = Entity.GetAbsOrigin(reference)
+    local need_issue = false
+    if not state.last_direction then
+        need_issue = true
+    else
+        local dot = direction:Dot2D(state.last_direction)
+        if dot < 0.995 then
+            need_issue = true
+        elseif now >= state.next_order_time then
+            need_issue = true
+        end
+    end
+
+    if not need_issue then
+        return
+    end
+
+    local origin = Entity.GetAbsOrigin(reference)
     local distance = ui.distance:Get() + ui.lead:Get()
-    local target = adjust_target(reference_pos, direction, distance)
+    local target = adjust_target(origin, direction, distance)
     if not target then
         state.next_order_time = now + ui.interval:Get() / 1000.0
         return
     end
 
-    state.last_input_direction = direction
-    Player.PrepareUnitOrders(
-        player,
-        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
-        nil,
-        target,
-        nil,
-        Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS,
-        issuers,
-        false,
-        false,
-        false,
-        false,
-        ORDER_IDENTIFIER
-    )
+    issue_move(player, units, target)
 
-    state.last_order_direction = (target - reference_pos):Normalized()
-    if ui.hold:Get() then
-        state.next_order_time = now + ui.interval:Get() / 1000.0
-    else
-        state.next_order_time = 0
-    end
+    state.last_direction = direction
+    state.moving = true
+    state.next_order_time = now + ui.interval:Get() / 1000.0
 end
 
 function keyboard_move.OnGameEnd()
-    state.last_input_direction = nil
-    state.last_order_direction = nil
+    state.last_direction = nil
     state.next_order_time = 0
-    state.wait_release = false
+    state.moving = false
 end
 
 return keyboard_move
