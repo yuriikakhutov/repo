@@ -21,8 +21,8 @@ local KEY_ORDER = {
 }
 
 local KEY_DIRECTIONS = {
-    [Enum.ButtonCode.KEY_W] = Vector(0, -1, 0), -- вверх по карте (север)
-    [Enum.ButtonCode.KEY_S] = Vector(0, 1, 0),  -- вниз (юг)
+    [Enum.ButtonCode.KEY_W] = Vector(0, 1, 0),  -- вверх по карте (север)
+    [Enum.ButtonCode.KEY_S] = Vector(0, -1, 0), -- вниз (юг)
     [Enum.ButtonCode.KEY_A] = Vector(-1, 0, 0), -- влево (запад)
     [Enum.ButtonCode.KEY_D] = Vector(1, 0, 0),  -- вправо (восток)
 }
