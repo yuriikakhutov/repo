@@ -44,14 +44,18 @@ local ABILITY_RULES = {
     centaur_khan_war_stomp = { cast = "no_target", range = 325 },
     hellbear_smasher_thunder_clap = { cast = "no_target", range = 350 },
     polar_furbolg_ursa_warrior_thunder_clap = { cast = "no_target", range = 350 },
-    dark_troll_warlord_ensnare = { cast = "target", range = 550, allow_zero_damage = true },
+    dark_troll_warlord_ensnare = { cast = "target", range = 550 },
     satyr_hellcaller_shockwave = { cast = "point", range = 950 },
+    satyr_soulstealer_mana_burn = { cast = "target", range = 650 },
+    satyr_trickster_purge = { cast = "target", range = 350 },
     mudgolem_hurl_boulder = { cast = "target", range = 800 },
     rock_golem_hurl_boulder = { cast = "target", range = 800 },
     greater_mudgolem_hurl_boulder = { cast = "target", range = 800 },
     greater_rock_golem_hurl_boulder = { cast = "target", range = 800 },
+    big_thunder_lizard_slam = { cast = "no_target", range = 325 },
     warpine_raider_seed_shot = { cast = "target", range = 600 },
     ogre_bruiser_ogre_smash = { cast = "point", range = 275 },
+    harpy_storm_chain_lightning = { cast = "target", range = 650 },
     black_dragon_fireball = { cast = "point", range = 1200 },
     ancient_black_dragon_fireball = { cast = "point", range = 1200 },
     granite_golem_hurl_boulder = { cast = "target", range = 900 },
@@ -64,6 +68,7 @@ local NO_TARGET_WHITELIST = {
     hellbear_smasher_thunder_clap = true,
     polar_furbolg_ursa_warrior_thunder_clap = true,
     ancient_thunderhide_slam = true,
+    big_thunder_lizard_slam = true,
 }
 
 local ABILITY_BLACKLIST = {
@@ -71,6 +76,8 @@ local ABILITY_BLACKLIST = {
     enraged_wildkin_tornado = true,
     ogre_magi_frost_armor = true,
     ancient_thunderhide_frenzy = true,
+    big_thunder_lizard_frenzy = true,
+    forest_troll_high_priest_heal = true,
 }
 
 local last_cast_time = 0
@@ -365,13 +372,6 @@ local function cast_creep_ability(creep, ability, enemies, game_time)
         and target_team ~= Enum.TargetTeam.DOTA_UNIT_TARGET_TEAM_ENEMY
         and target_team ~= Enum.TargetTeam.DOTA_UNIT_TARGET_TEAM_BOTH then
         return false
-    end
-
-    if cast_type == "target" and (not config or not config.allow_zero_damage) then
-        local damage = Ability.GetDamage(ability)
-        if not damage or damage <= 0 then
-            return false
-        end
     end
 
     if cast_type == "no_target" and not (config or NO_TARGET_WHITELIST[ability_name]) then
