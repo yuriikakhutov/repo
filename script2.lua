@@ -26,12 +26,19 @@ local function clampToWindow(x, y)
     return math.max(minX, math.min(maxX, x)), math.max(minY, math.min(maxY, y))
 end
 
+function love.load()
+    love.window.setTitle("Mouse Click Hero Movement Demo")
+end
+
 local function setTarget(x, y)
     target.x, target.y = clampToWindow(x, y)
 end
 
-function love.load()
-    love.window.setTitle("Mouse Click Hero Movement Demo")
+local function simulateRightClick(x, y)
+    local clampedX, clampedY = clampToWindow(x, y)
+
+    love.event.push("mousepressed", clampedX, clampedY, 2, false, 1)
+    love.event.push("mousereleased", clampedX, clampedY, 2, false, 1)
 end
 
 local function handleMovement(dt)
@@ -123,7 +130,7 @@ function love.keypressed(key)
     local newX = hero.x + normX * clickDistance
     local newY = hero.y + normY * clickDistance
 
-    setTarget(newX, newY)
+    simulateRightClick(newX, newY)
 end
 
 function love.draw()
@@ -131,7 +138,7 @@ function love.draw()
     love.graphics.rectangle("fill", hero.x - hero.size / 2, hero.y - hero.size / 2, hero.size, hero.size)
 
     love.graphics.setColor(1, 1, 1)
-    love.graphics.print("ПКМ или WASD (клик-имитация) — отправьте героя в точку", 16, 16)
+    love.graphics.print("ПКМ или WASD (эмулируют ПКМ-клик) — отправьте героя в точку", 16, 16)
 
     love.graphics.setColor(0.8, 0.2, 0.2, 0.5)
     love.graphics.circle("fill", target.x, target.y, 6)
