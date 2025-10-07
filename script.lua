@@ -62,6 +62,28 @@ local last_maintain_time = 0
 local cache_interval = 0.25
 local is_internal_order = false
 
+local function build_selected_lookup(player)
+    local lookup = {}
+    if not player or not Player or not Player.GetSelectedUnits then
+        return lookup
+    end
+
+    local ok, selected = pcall(Player.GetSelectedUnits, player)
+    if not ok or type(selected) ~= "table" then
+        return lookup
+    end
+
+    for i = 1, #selected do
+        local npc = selected[i]
+        local index = npc and Entity.GetIndex(npc)
+        if index then
+            lookup[index] = true
+        end
+    end
+
+    return lookup
+end
+
 local function clear_state()
     cached_units = {}
     unit_state = {}
@@ -422,6 +444,7 @@ local function refresh_controlled_units(hero, now)
     end
 
     local prefs = get_preferences()
+    local selected_lookup = build_selected_lookup(player)
     local alive_indices = {}
     local list = {}
 
@@ -429,10 +452,16 @@ local function refresh_controlled_units(hero, now)
         if npc ~= hero and Entity.IsAlive(npc) and not Entity.IsDormant(npc) then
             if NPC.IsControllableByPlayer(npc, player_id) and not NPC.IsWaitingToSpawn(npc) and not NPC.IsStructure(npc) then
                 if should_control(npc, hero, prefs) then
-                    list[#list + 1] = npc
-                    local state, index = get_unit_state(npc)
-                    state.last_seen = now
-                    alive_indices[index] = true
+                    local index = Entity.GetIndex(npc)
+                    if not index or not selected_lookup[index] then
+                        list[#list + 1] = npc
+                        local state
+                        state, index = get_unit_state(npc)
+                        state.last_seen = now
+                        if index then
+                            alive_indices[index] = true
+                        end
+                    end
                 end
             end
         end
@@ -531,12 +560,17 @@ local function forward_hero_order(order)
     end
 
     local to_command = {}
+    local selected_lookup = build_selected_lookup(local_player)
+
     for _, npc in ipairs(units) do
         if Entity.IsAlive(npc) then
             local state = get_unit_state(npc)
-            state.last_mirror = now
-            state.last_follow = now
-            to_command[#to_command + 1] = npc
+            local index = Entity.GetIndex(npc)
+            if not index or not selected_lookup[index] then
+                state.last_mirror = now
+                state.last_follow = now
+                to_command[#to_command + 1] = npc
+            end
         end
     end
 
@@ -579,54 +613,60 @@ local function maintain_units(hero, units, now)
     local hold_units = {}
     local direct_attacks = {}
 
+    local player = Players.GetLocal()
+    local selected_lookup = build_selected_lookup(player)
+
     for _, npc in ipairs(units) do
         if Entity.IsAlive(npc) and not Entity.IsDormant(npc) then
             local state = get_unit_state(npc)
-            if state.last_attack_target and not is_valid_enemy(state.last_attack_target, hero_team) then
-                state.last_attack_target = nil
-                state.last_attack_target_index = nil
-            end
+            local index = Entity.GetIndex(npc)
+            if not index or not selected_lookup[index] then
+                if state.last_attack_target and not is_valid_enemy(state.last_attack_target, hero_team) then
+                    state.last_attack_target = nil
+                    state.last_attack_target_index = nil
+                end
 
-            local attack_target = select_unit_attack_target(npc, hero, hero_target, hero_team)
-            local ability_target = attack_target or hero_target
-            process_unit_abilities(npc, ability_target, hero_team, now, state)
+                local attack_target = select_unit_attack_target(npc, hero, hero_target, hero_team)
+                local ability_target = attack_target or hero_target
+                process_unit_abilities(npc, ability_target, hero_team, now, state)
 
-            if attack_target and (now - state.last_mirror) >= 0.05 then
-                local target_index = Entity.GetIndex(attack_target)
-                if target_index then
-                    local needs_order = true
-                    if state.last_attack_target_index == target_index then
-                        if (now - state.last_attack_time) < 0.4 then
-                            needs_order = false
+                if attack_target and (now - state.last_mirror) >= 0.05 then
+                    local target_index = Entity.GetIndex(attack_target)
+                    if target_index then
+                        local needs_order = true
+                        if state.last_attack_target_index == target_index then
+                            if (now - state.last_attack_time) < 0.4 then
+                                needs_order = false
+                            end
                         end
-                    end
-                    if needs_order then
-                        local group = direct_attacks[target_index]
-                        if not group then
-                            group = { target = attack_target, units = {} }
-                            direct_attacks[target_index] = group
+                        if needs_order then
+                            local group = direct_attacks[target_index]
+                            if not group then
+                                group = { target = attack_target, units = {} }
+                                direct_attacks[target_index] = group
+                            end
+                            group.units[#group.units + 1] = npc
+                            state.last_attack_target = attack_target
+                            state.last_attack_target_index = target_index
+                            state.last_attack_time = now
+                            state.last_follow = now
                         end
-                        group.units[#group.units + 1] = npc
-                        state.last_attack_target = attack_target
-                        state.last_attack_target_index = target_index
-                        state.last_attack_time = now
-                        state.last_follow = now
                     end
                 end
-            end
 
-            if (now - state.last_mirror) >= interval then
-                local position = Entity.GetAbsOrigin(npc)
-                local distance = hero_position:Distance2D(position)
-                if distance >= (follow_radius + threshold) and (now - state.last_follow) >= interval then
-                    if fallback_mode == 0 then
-                        move_units[#move_units + 1] = npc
-                    elseif fallback_mode == 1 then
-                        attack_units[#attack_units + 1] = npc
-                    else
-                        hold_units[#hold_units + 1] = npc
+                if (now - state.last_mirror) >= interval then
+                    local position = Entity.GetAbsOrigin(npc)
+                    local distance = hero_position:Distance2D(position)
+                    if distance >= (follow_radius + threshold) and (now - state.last_follow) >= interval then
+                        if fallback_mode == 0 then
+                            move_units[#move_units + 1] = npc
+                        elseif fallback_mode == 1 then
+                            attack_units[#attack_units + 1] = npc
+                        else
+                            hold_units[#hold_units + 1] = npc
+                        end
+                        state.last_follow = now
                     end
-                    state.last_follow = now
                 end
             end
         end
