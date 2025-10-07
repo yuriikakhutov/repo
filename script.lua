@@ -142,51 +142,164 @@ local function find_enemy_near_position(hero, center_pos, radius)
     return best_target
 end
 
+local function resolve_attack_order_type()
+    if Enum and Enum.UnitOrder and Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET then
+        return Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET
+    end
+
+    return nil
+end
+
+local function resolve_move_order_type()
+    if Enum and Enum.UnitOrder and Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION then
+        return Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION
+    end
+
+    return nil
+end
+
 local function issue_attack(player, npc, target)
     if not Player or not Player.AttackTarget then
-        return
+        return false
     end
 
     local npc_index = get_entity_index(npc)
     if not npc_index then
-        return
+        return false
     end
 
     local target_index = get_entity_index(target)
     if not target_index then
-        return
+        return false
     end
+
     local now = get_game_time()
     local memory = attack_memory[npc_index]
 
     if memory and memory.target == target_index and now - memory.time < ATTACK_REISSUE_DELAY then
-        return
+        return false
     end
 
     Player.AttackTarget(player, npc, target, false, false, true)
     attack_memory[npc_index] = { target = target_index, time = now }
     move_memory[npc_index] = nil
+
+    return true
 end
 
 local function issue_follow(npc, destination)
     if not NPC or not NPC.MoveTo then
-        return
+        return false
     end
 
     local npc_index = get_entity_index(npc)
     if not npc_index then
-        return
+        return false
     end
 
     local now = get_game_time()
     local last_order_time = move_memory[npc_index]
     if last_order_time and now - last_order_time < MOVE_REISSUE_DELAY then
-        return
+        return false
     end
 
     NPC.MoveTo(npc, destination, false, false, false, true)
     move_memory[npc_index] = now
     attack_memory[npc_index] = nil
+
+    return true
+end
+
+local function issue_attack_group(player, units, target)
+    if not units or #units == 0 then
+        return
+    end
+
+    if Player and Player.PrepareUnitOrders then
+        local attack_order = resolve_attack_order_type()
+        local target_index = get_entity_index(target)
+
+        if attack_order and target_index then
+            local valid_units = {}
+            local now = get_game_time()
+
+            for _, unit in ipairs(units) do
+                local unit_index = get_entity_index(unit)
+                if unit_index then
+                    table.insert(valid_units, unit)
+                end
+            end
+
+            if #valid_units > 0 then
+                Player.PrepareUnitOrders(player, {
+                    OrderType = attack_order,
+                    Units = valid_units,
+                    TargetIndex = target_index,
+                    Queue = false,
+                    ShowEffects = false,
+                })
+
+                for _, unit in ipairs(valid_units) do
+                    local unit_index = get_entity_index(unit)
+                    if unit_index then
+                        attack_memory[unit_index] = { target = target_index, time = now }
+                        move_memory[unit_index] = nil
+                    end
+                end
+
+                return
+            end
+        end
+    end
+
+    for _, unit in ipairs(units) do
+        issue_attack(player, unit, target)
+    end
+end
+
+local function issue_follow_group(player, units, destination)
+    if not units or #units == 0 then
+        return
+    end
+
+    if Player and Player.PrepareUnitOrders then
+        local move_order = resolve_move_order_type()
+        if move_order then
+            local valid_units = {}
+            local now = get_game_time()
+
+            for _, unit in ipairs(units) do
+                local unit_index = get_entity_index(unit)
+                if unit_index then
+                    table.insert(valid_units, unit)
+                end
+            end
+
+            if #valid_units > 0 then
+                Player.PrepareUnitOrders(player, {
+                    OrderType = move_order,
+                    Units = valid_units,
+                    Position = destination,
+                    Queue = false,
+                    ShowEffects = false,
+                })
+
+                for _, unit in ipairs(valid_units) do
+                    local unit_index = get_entity_index(unit)
+                    if unit_index then
+                        move_memory[unit_index] = now
+                        attack_memory[unit_index] = nil
+                    end
+                end
+
+                return
+            end
+        end
+    end
+
+    for _, unit in ipairs(units) do
+        issue_follow(unit, destination)
+    end
 end
 
 local function should_handle_dark_troll(npc, player_id)
@@ -255,6 +368,10 @@ function script.OnUpdate()
 
     local processed_indices = {}
     local enemy_target = find_enemy_near_position(hero, hero_pos, FOLLOW_RADIUS)
+    local enemy_target_index = enemy_target and get_entity_index(enemy_target) or nil
+    local attack_units = {}
+    local follow_units = {}
+    local now = get_game_time()
 
     for _, npc in pairs(NPCs.GetAll()) do
         if should_handle_dark_troll(npc, player_id) then
@@ -264,31 +381,51 @@ function script.OnUpdate()
                 cast_raise_dead(npc)
             end
 
-            if enemy_target and (not is_alive_and_visible(enemy_target) or NPC and NPC.IsKillable and not NPC.IsKillable(enemy_target)) then
-                enemy_target = nil
+            local npc_index = get_entity_index(npc)
+
+            if enemy_target and enemy_target_index then
+                if not is_alive_and_visible(enemy_target) then
+                    enemy_target = nil
+                    enemy_target_index = nil
+                elseif NPC and NPC.IsKillable and not NPC.IsKillable(enemy_target) then
+                    enemy_target = nil
+                    enemy_target_index = nil
+                end
             end
 
             if not enemy_target then
                 enemy_target = find_enemy_near_position(hero, hero_pos, FOLLOW_RADIUS)
+                enemy_target_index = enemy_target and get_entity_index(enemy_target) or nil
             end
 
-            if enemy_target then
-                issue_attack(player, npc, enemy_target)
+            if enemy_target and enemy_target_index and npc_index then
+                local memory = attack_memory[npc_index]
+                if not (memory and memory.target == enemy_target_index and now - memory.time < ATTACK_REISSUE_DELAY) then
+                    table.insert(attack_units, npc)
+                end
             else
                 local npc_pos = Entity.GetAbsOrigin(npc)
-                if npc_pos then
+                if npc_pos and npc_index then
                     local distance_to_hero = (hero_pos - npc_pos):Length2D()
                     if distance_to_hero > FOLLOW_REPOSITION_DISTANCE then
-                        issue_follow(npc, hero_pos)
-                    else
-                        local npc_index_inner = get_entity_index(npc)
-                        if npc_index_inner then
-                            attack_memory[npc_index_inner] = nil
+                        local last_order_time = move_memory[npc_index]
+                        if not last_order_time or now - last_order_time >= MOVE_REISSUE_DELAY then
+                            table.insert(follow_units, npc)
                         end
+                    else
+                        attack_memory[npc_index] = nil
                     end
                 end
             end
         end
+    end
+
+    if enemy_target and enemy_target_index and #attack_units > 0 then
+        issue_attack_group(player, attack_units, enemy_target)
+    end
+
+    if (not enemy_target) and #follow_units > 0 then
+        issue_follow_group(player, follow_units, hero_pos)
     end
 
     for index in pairs(attack_memory) do
