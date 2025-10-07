@@ -4,23 +4,67 @@ local script = {}
 
 local DARK_TROLL_WARLORD_NAME <const> = "npc_dota_neutral_dark_troll_warlord"
 local RAISE_DEAD_SLOT <const> = 0
+local FOLLOW_RADIUS <const> = 500
+local FOLLOW_REPOSITION_DISTANCE <const> = 300
+local MOVE_REISSUE_DELAY <const> = 0.3
+local ATTACK_REISSUE_DELAY <const> = 0.2
 
-local function find_player_id()
+local attack_memory = {}
+local move_memory = {}
+
+local function get_entity_index(entity)
+    if Entity and Entity.GetIndex then
+        return Entity.GetIndex(entity)
+    end
+
+    return nil
+end
+
+local function get_game_time()
+    if GameRules and GameRules.GetGameTime then
+        return GameRules.GetGameTime()
+    end
+
+    return 0
+end
+
+local function is_alive_and_visible(entity)
+    return entity
+        and Entity
+        and Entity.IsAlive
+        and Entity.IsAlive(entity)
+        and (not Entity.IsDormant or not Entity.IsDormant(entity))
+end
+
+local function resolve_local_player()
     if not Players or not Players.GetLocal then
-        return nil
+        return nil, nil
     end
 
     local player = Players.GetLocal()
     if not player or not Player or not Player.GetPlayerID then
+        return nil, nil
+    end
+
+    local player_id = Player.GetPlayerID(player)
+    if not player_id or player_id < 0 then
+        return nil, nil
+    end
+
+    return player, player_id
+end
+
+local function get_local_hero()
+    if not Heroes or not Heroes.GetLocal then
         return nil
     end
 
-    local id = Player.GetPlayerID(player)
-    if not id or id < 0 then
-        return nil
+    local hero = Heroes.GetLocal()
+    if is_alive_and_visible(hero) then
+        return hero
     end
 
-    return id
+    return nil
 end
 
 local function can_cast_raise_dead(ability, mana)
@@ -65,23 +109,177 @@ local function cast_raise_dead(npc)
     Ability.CastNoTarget(ability)
 end
 
-function script.OnUpdate()
-    local player_id = find_player_id()
-    if not player_id then
-        return
+local function find_enemy_near_position(hero, center_pos, radius)
+    if not NPCs or not NPCs.GetAll or not Entity or not Entity.IsSameTeam then
+        return nil
     end
 
-    if not NPCs or not NPCs.GetAll then
-        return
-    end
+    local radius_sqr = radius * radius
+    local best_target
+    local best_distance
 
-    for _, npc in pairs(NPCs.GetAll()) do
-        if npc and Entity and Entity.IsAlive and Entity.IsAlive(npc) and not Entity.IsDormant(npc) then
-            if NPC.IsControllableByPlayer and NPC.IsControllableByPlayer(npc, player_id) then
-                if NPC.GetUnitName and NPC.GetUnitName(npc) == DARK_TROLL_WARLORD_NAME then
-                    cast_raise_dead(npc)
+    for _, candidate in pairs(NPCs.GetAll()) do
+        if is_alive_and_visible(candidate)
+            and candidate ~= hero
+            and not Entity.IsSameTeam(hero, candidate)
+        then
+            if not NPC or not NPC.IsKillable or NPC.IsKillable(candidate) then
+                local candidate_pos = Entity.GetAbsOrigin(candidate)
+                if candidate_pos then
+                    local distance = (candidate_pos - center_pos):Length2DSqr()
+                    if distance <= radius_sqr then
+                        if not best_distance or distance < best_distance then
+                            best_target = candidate
+                            best_distance = distance
+                        end
+                    end
                 end
             end
+        end
+    end
+
+    return best_target
+end
+
+local function issue_attack(player, npc, target)
+    if not Player or not Player.AttackTarget then
+        return
+    end
+
+    local npc_index = get_entity_index(npc)
+    if not npc_index then
+        return
+    end
+
+    local target_index = get_entity_index(target)
+    if not target_index then
+        return
+    end
+    local now = get_game_time()
+    local memory = attack_memory[npc_index]
+
+    if memory and memory.target == target_index and now - memory.time < ATTACK_REISSUE_DELAY then
+        return
+    end
+
+    Player.AttackTarget(player, npc, target, false, false, true)
+    attack_memory[npc_index] = { target = target_index, time = now }
+    move_memory[npc_index] = nil
+end
+
+local function issue_follow(npc, destination)
+    if not NPC or not NPC.MoveTo then
+        return
+    end
+
+    local npc_index = get_entity_index(npc)
+    if not npc_index then
+        return
+    end
+
+    local now = get_game_time()
+    local last_order_time = move_memory[npc_index]
+    if last_order_time and now - last_order_time < MOVE_REISSUE_DELAY then
+        return
+    end
+
+    NPC.MoveTo(npc, destination, false, false, false, true)
+    move_memory[npc_index] = now
+    attack_memory[npc_index] = nil
+end
+
+local function should_handle_dark_troll(npc, player_id)
+    if not npc or not NPC or not NPC.IsControllableByPlayer or not Entity or not Entity.IsAlive then
+        return false
+    end
+
+    if not Entity.IsAlive(npc) then
+        return false
+    end
+
+    if Entity.IsDormant and Entity.IsDormant(npc) then
+        return false
+    end
+
+    if not NPC.IsControllableByPlayer(npc, player_id) then
+        return false
+    end
+
+    if NPC.GetUnitName and NPC.GetUnitName(npc) ~= DARK_TROLL_WARLORD_NAME then
+        return false
+    end
+
+    return true
+end
+
+function script.OnUpdate()
+    local player, player_id = resolve_local_player()
+    if not player then
+        return
+    end
+
+    local hero = get_local_hero()
+    if not hero then
+        return
+    end
+
+    if not NPCs or not NPCs.GetAll or not Entity or not Entity.GetAbsOrigin then
+        return
+    end
+
+    local hero_pos = Entity.GetAbsOrigin(hero)
+    if not hero_pos then
+        return
+    end
+
+    local processed_indices = {}
+    local enemy_target = find_enemy_near_position(hero, hero_pos, FOLLOW_RADIUS)
+
+    for _, npc in pairs(NPCs.GetAll()) do
+        if should_handle_dark_troll(npc, player_id) then
+            local npc_index = get_entity_index(npc)
+            if npc_index then
+                processed_indices[npc_index] = true
+            end
+
+            cast_raise_dead(npc)
+
+            if enemy_target and (not is_alive_and_visible(enemy_target) or NPC and NPC.IsKillable and not NPC.IsKillable(enemy_target)) then
+                enemy_target = nil
+            end
+
+            if not enemy_target then
+                enemy_target = find_enemy_near_position(hero, hero_pos, FOLLOW_RADIUS)
+            end
+
+            if enemy_target then
+                issue_attack(player, npc, enemy_target)
+            else
+                local npc_pos = Entity.GetAbsOrigin(npc)
+                if npc_pos then
+                    local distance_to_hero = (hero_pos - npc_pos):Length2D()
+                    if distance_to_hero > FOLLOW_REPOSITION_DISTANCE then
+                        issue_follow(npc, hero_pos)
+                    else
+                        local npc_index_inner = get_entity_index(npc)
+                        if npc_index_inner then
+                            attack_memory[npc_index_inner] = nil
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    for index in pairs(attack_memory) do
+        if not processed_indices[index] then
+            attack_memory[index] = nil
+        end
+    end
+
+    for index in pairs(move_memory) do
+        if not processed_indices[index] then
+            move_memory[index] = nil
         end
     end
 end
