@@ -4,6 +4,13 @@ local script = {}
 
 local SCRIPT_ID <const> = "auto_unit_controller"
 local ZERO_VECTOR <const> = Vector()
+local bit_module = bit32 or bit
+local BIT_BAND <const> = bit_module and bit_module.band or function() return 0 end
+
+local hero_state = {
+    last_target = nil,
+    last_target_time = -math.huge,
+}
 
 local root_tab = Menu.Create("General", "Unit Control", "Auto Units", "Auto Control")
 local main_group = root_tab:Create("Настройки")
@@ -60,6 +67,8 @@ local function clear_state()
     unit_state = {}
     last_cache_time = 0
     last_maintain_time = 0
+    hero_state.last_target = nil
+    hero_state.last_target_time = -math.huge
 end
 
 ui.enabled:SetCallback(function(widget)
@@ -85,11 +94,261 @@ local function get_unit_state(npc)
         state = {
             last_mirror = -math.huge,
             last_follow = -math.huge,
+            last_attack_time = -math.huge,
+            last_attack_target = nil,
+            last_attack_target_index = nil,
+            ability_last_cast = {},
         }
         unit_state[index] = state
     end
     state.npc = npc
     return state, index
+end
+
+local function is_valid_enemy(entity, hero_team)
+    return entity and Entity.IsAlive(entity) and not Entity.IsDormant(entity) and Entity.GetTeamNum(entity) ~= hero_team
+end
+
+local function distance_between(entity_a, entity_b)
+    local origin_a = Entity.GetAbsOrigin(entity_a)
+    local origin_b = Entity.GetAbsOrigin(entity_b)
+    if not origin_a or not origin_b then
+        return math.huge
+    end
+    return origin_a:Distance2D(origin_b)
+end
+
+local function find_nearest(entity, list)
+    if not list then
+        return nil
+    end
+    local best_target
+    local best_distance = math.huge
+    local origin = Entity.GetAbsOrigin(entity)
+    if not origin then
+        return nil
+    end
+    for i = 1, #list do
+        local target = list[i]
+        local target_origin = Entity.GetAbsOrigin(target)
+        if target_origin then
+            local distance = origin:Distance2D(target_origin)
+            if distance < best_distance then
+                best_distance = distance
+                best_target = target
+            end
+        end
+    end
+    return best_target, best_distance
+end
+
+local function enemy_nearby(npc, radius)
+    if radius <= 0 then
+        radius = 600
+    end
+    local heroes = Entity.GetHeroesInRadius(npc, radius, Enum.TeamType.TEAM_ENEMY, false, true)
+    if heroes and #heroes > 0 then
+        return heroes[1]
+    end
+    local creeps = Entity.GetUnitsInRadius(npc, radius, Enum.TeamType.TEAM_ENEMY, false, true)
+    if creeps and #creeps > 0 then
+        return creeps[1]
+    end
+    return nil
+end
+
+local function get_cast_range(ability, npc)
+    local range = Ability.GetCastRange(ability)
+    if type(range) ~= "number" or range <= 0 then
+        if npc and NPC.GetAttackRange then
+            local attack_range = NPC.GetAttackRange(npc)
+            if attack_range and attack_range > 0 then
+                range = attack_range + 100
+            else
+                range = 600
+            end
+        else
+            range = 600
+        end
+    end
+    return range
+end
+
+local function ability_targets_enemies(ability)
+    local team = Ability.GetTargetTeam(ability)
+    if team == nil then
+        return true
+    end
+    return team == Enum.TargetTeam.DOTA_UNIT_TARGET_TEAM_ENEMY
+        or team == Enum.TargetTeam.DOTA_UNIT_TARGET_TEAM_BOTH
+        or team == Enum.TargetTeam.DOTA_UNIT_TARGET_TEAM_CUSTOM
+end
+
+local function should_attempt_ability(state, ability, now)
+    local attempts = state.ability_last_cast
+    local last = attempts[ability]
+    if last and (now - last) < 0.3 then
+        return false
+    end
+    return true
+end
+
+local function record_ability_attempt(state, ability, now)
+    state.ability_last_cast[ability] = now
+end
+
+local function cast_unit_ability(npc, ability, target, hero_team, now, state)
+    if not ability or Ability.IsHidden(ability) then
+        return false
+    end
+    if Ability.GetLevel(ability) <= 0 then
+        return false
+    end
+    if not Ability.IsActivated(ability) then
+        return false
+    end
+    local mana = NPC.GetMana(npc)
+    if not Ability.IsReady(ability) then
+        return false
+    end
+    if not Ability.IsCastable(ability, mana) then
+        return false
+    end
+
+    local behavior = Ability.GetBehavior(ability)
+    if type(behavior) ~= "number" then
+        return false
+    end
+
+    if BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_PASSIVE) ~= 0 then
+        return false
+    end
+    if BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_TOGGLE) ~= 0 then
+        return false
+    end
+    if BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_ITEM) ~= 0 then
+        return false
+    end
+    if BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_VECTOR_TARGETING) ~= 0 then
+        return false
+    end
+
+    if (NPC.IsSilenced and NPC.IsSilenced(npc)) and BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_CHANNELLED) == 0 then
+        local team = Ability.GetTargetTeam(ability)
+        if team == Enum.TargetTeam.DOTA_UNIT_TARGET_TEAM_ENEMY or team == Enum.TargetTeam.DOTA_UNIT_TARGET_TEAM_BOTH then
+            return false
+        end
+    end
+
+    if not should_attempt_ability(state, ability, now) then
+        return false
+    end
+
+    local npc_origin = Entity.GetAbsOrigin(npc)
+    if not npc_origin then
+        return false
+    end
+
+    local casted = false
+    local cast_range = get_cast_range(ability, npc)
+    local use_target = target
+
+    if BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET) ~= 0 then
+        if not ability_targets_enemies(ability) then
+            return false
+        end
+        if not is_valid_enemy(use_target, hero_team) or distance_between(npc, use_target) > (cast_range + 100) then
+            local heroes = Entity.GetHeroesInRadius(npc, cast_range + 100, Enum.TeamType.TEAM_ENEMY, false, true)
+            use_target = find_nearest(npc, heroes)
+            if not use_target then
+                local creeps = Entity.GetUnitsInRadius(npc, cast_range + 100, Enum.TeamType.TEAM_ENEMY, false, true)
+                use_target = find_nearest(npc, creeps)
+            end
+        end
+        if is_valid_enemy(use_target, hero_team) then
+            record_ability_attempt(state, ability, now)
+            Ability.CastTarget(ability, use_target)
+            casted = true
+        end
+    elseif BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_POINT) ~= 0 then
+        local target_entity = use_target or enemy_nearby(npc, cast_range + 200)
+        if is_valid_enemy(target_entity, hero_team) then
+            local position = Entity.GetAbsOrigin(target_entity)
+            if position and npc_origin:Distance2D(position) <= (cast_range + 200) then
+                record_ability_attempt(state, ability, now)
+                Ability.CastPosition(ability, position)
+                casted = true
+            end
+        end
+    elseif BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_NO_TARGET) ~= 0 then
+        if use_target and is_valid_enemy(use_target, hero_team) and distance_between(npc, use_target) <= (cast_range + 150) then
+            record_ability_attempt(state, ability, now)
+            Ability.CastNoTarget(ability)
+            casted = true
+        else
+            local nearby = enemy_nearby(npc, cast_range + 150)
+            if nearby and is_valid_enemy(nearby, hero_team) then
+                record_ability_attempt(state, ability, now)
+                Ability.CastNoTarget(ability)
+                casted = true
+            end
+        end
+    end
+
+    if casted then
+        state.last_follow = now
+    end
+
+    return casted
+end
+
+local function process_unit_abilities(npc, target, hero_team, now, state)
+    if NPC.IsChannellingAbility and NPC.IsChannellingAbility(npc) then
+        return
+    end
+    if NPC.IsStunned and NPC.IsStunned(npc) then
+        return
+    end
+
+    for slot = 0, 23 do
+        local ability = NPC.GetAbilityByIndex(npc, slot)
+        if not ability then
+            break
+        end
+        if cast_unit_ability(npc, ability, target, hero_team, now, state) then
+            break
+        end
+    end
+end
+
+local function select_unit_attack_target(npc, hero, hero_target, hero_team)
+    if is_valid_enemy(hero_target, hero_team) and distance_between(npc, hero_target) <= 2000 then
+        return hero_target
+    end
+
+    local heroes = Entity.GetHeroesInRadius(npc, 1500, Enum.TeamType.TEAM_ENEMY, false, true)
+    local target = find_nearest(npc, heroes)
+    if is_valid_enemy(target, hero_team) then
+        return target
+    end
+
+    local creeps = Entity.GetUnitsInRadius(npc, 1200, Enum.TeamType.TEAM_ENEMY, false, true)
+    target = find_nearest(npc, creeps)
+    if is_valid_enemy(target, hero_team) then
+        return target
+    end
+
+    return nil
+end
+
+local function get_current_hero_target(hero, now)
+    local hero_team = Entity.GetTeamNum(hero)
+    local target = hero_state.last_target
+    if is_valid_enemy(target, hero_team) and (now - hero_state.last_target_time) <= 5.0 then
+        return target
+    end
+    hero_state.last_target = nil
+    return nil
 end
 
 local function get_preferences()
@@ -253,6 +512,19 @@ local function forward_hero_order(order)
     end
 
     local now = get_time()
+    if order.order == Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET then
+        if order.target then
+            hero_state.last_target = order.target
+            hero_state.last_target_time = now
+        end
+    elseif order.order == Enum.UnitOrder.DOTA_UNIT_ORDER_STOP or order.order == Enum.UnitOrder.DOTA_UNIT_ORDER_HOLD_POSITION then
+        hero_state.last_target = nil
+        hero_state.last_target_time = -math.huge
+    elseif order.order == Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_MOVE then
+        hero_state.last_target = nil
+        hero_state.last_target_time = now
+    end
+
     local units = ensure_units_cache(hero, now)
     if #units == 0 then
         return
@@ -296,13 +568,53 @@ local function maintain_units(hero, units, now)
         end
     end
 
+    local hero_team = Entity.GetTeamNum(hero)
+    local hero_target = get_current_hero_target(hero, now)
+    if not is_valid_enemy(hero_target, hero_team) then
+        hero_target = nil
+    end
+
     local move_units = {}
     local attack_units = {}
     local hold_units = {}
+    local direct_attacks = {}
 
     for _, npc in ipairs(units) do
         if Entity.IsAlive(npc) and not Entity.IsDormant(npc) then
             local state = get_unit_state(npc)
+            if state.last_attack_target and not is_valid_enemy(state.last_attack_target, hero_team) then
+                state.last_attack_target = nil
+                state.last_attack_target_index = nil
+            end
+
+            local attack_target = select_unit_attack_target(npc, hero, hero_target, hero_team)
+            local ability_target = attack_target or hero_target
+            process_unit_abilities(npc, ability_target, hero_team, now, state)
+
+            if attack_target and (now - state.last_mirror) >= 0.05 then
+                local target_index = Entity.GetIndex(attack_target)
+                if target_index then
+                    local needs_order = true
+                    if state.last_attack_target_index == target_index then
+                        if (now - state.last_attack_time) < 0.4 then
+                            needs_order = false
+                        end
+                    end
+                    if needs_order then
+                        local group = direct_attacks[target_index]
+                        if not group then
+                            group = { target = attack_target, units = {} }
+                            direct_attacks[target_index] = group
+                        end
+                        group.units[#group.units + 1] = npc
+                        state.last_attack_target = attack_target
+                        state.last_attack_target_index = target_index
+                        state.last_attack_time = now
+                        state.last_follow = now
+                    end
+                end
+            end
+
             if (now - state.last_mirror) >= interval then
                 local position = Entity.GetAbsOrigin(npc)
                 local distance = hero_position:Distance2D(position)
@@ -317,6 +629,12 @@ local function maintain_units(hero, units, now)
                     state.last_follow = now
                 end
             end
+        end
+    end
+
+    for _, group in pairs(direct_attacks) do
+        if group.target and group.units and #group.units > 0 then
+            issue_group_order(group.units, Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET, group.target, ZERO_VECTOR, false, false)
         end
     end
 
