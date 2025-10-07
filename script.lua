@@ -3,8 +3,9 @@
 local script = {}
 
 local DARK_TROLL_WARLORD_NAME <const> = "npc_dota_neutral_dark_troll_warlord"
+local DARK_TROLL_SKELETON_NAME <const> = "npc_dota_dark_troll_warlord_skeleton_warrior"
 local RAISE_DEAD_SLOT <const> = 0
-local FOLLOW_RADIUS <const> = 500
+local FOLLOW_RADIUS <const> = 600
 local FOLLOW_REPOSITION_DISTANCE <const> = 300
 local MOVE_REISSUE_DELAY <const> = 0.3
 local ATTACK_REISSUE_DELAY <const> = 0.2
@@ -205,11 +206,31 @@ local function should_handle_dark_troll(npc, player_id)
         return false
     end
 
-    if NPC.GetUnitName and NPC.GetUnitName(npc) ~= DARK_TROLL_WARLORD_NAME then
+    if NPC.GetUnitName then
+        local unit_name = NPC.GetUnitName(npc)
+        if unit_name ~= DARK_TROLL_WARLORD_NAME and unit_name ~= DARK_TROLL_SKELETON_NAME then
+            return false
+        end
+    else
         return false
     end
 
     return true
+end
+
+local function is_dark_troll_warlord(npc)
+    if not NPC or not NPC.GetUnitName then
+        return false
+    end
+
+    return NPC.GetUnitName(npc) == DARK_TROLL_WARLORD_NAME
+end
+
+local function record_processed_index(processed_indices, npc)
+    local npc_index = get_entity_index(npc)
+    if npc_index then
+        processed_indices[npc_index] = true
+    end
 end
 
 function script.OnUpdate()
@@ -237,12 +258,11 @@ function script.OnUpdate()
 
     for _, npc in pairs(NPCs.GetAll()) do
         if should_handle_dark_troll(npc, player_id) then
-            local npc_index = get_entity_index(npc)
-            if npc_index then
-                processed_indices[npc_index] = true
-            end
+            record_processed_index(processed_indices, npc)
 
-            cast_raise_dead(npc)
+            if is_dark_troll_warlord(npc) then
+                cast_raise_dead(npc)
+            end
 
             if enemy_target and (not is_alive_and_visible(enemy_target) or NPC and NPC.IsKillable and not NPC.IsKillable(enemy_target)) then
                 enemy_target = nil
