@@ -219,7 +219,7 @@ local function record_ability_attempt(state, ability, now)
     state.ability_last_cast[ability] = now
 end
 
-local function cast_unit_ability(npc, ability, target, hero_team, now, state)
+local function cast_unit_ability(npc, ability, target, threat, hero_team, now, state)
     if not ability or Ability.IsHidden(ability) then
         return false
     end
@@ -273,12 +273,28 @@ local function cast_unit_ability(npc, ability, target, hero_team, now, state)
 
     local casted = false
     local cast_range = get_cast_range(ability, npc)
-    local use_target = target
+    local engaged_target = nil
+    if is_valid_enemy(target, hero_team) then
+        engaged_target = target
+    elseif is_valid_enemy(threat, hero_team) then
+        engaged_target = threat
+    end
+    local attack_target = nil
+    if NPC.GetAttackTarget then
+        attack_target = NPC.GetAttackTarget(npc)
+        if not is_valid_enemy(attack_target, hero_team) then
+            attack_target = nil
+        end
+    end
+    if not engaged_target then
+        engaged_target = attack_target
+    end
 
     if BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET) ~= 0 then
         if not ability_targets_enemies(ability) then
             return false
         end
+        local use_target = engaged_target
         if not is_valid_enemy(use_target, hero_team) or distance_between(npc, use_target) > (cast_range + 100) then
             local heroes = Entity.GetHeroesInRadius(npc, cast_range + 100, Enum.TeamType.TEAM_ENEMY, false, true)
             use_target = find_nearest(npc, heroes)
@@ -293,7 +309,10 @@ local function cast_unit_ability(npc, ability, target, hero_team, now, state)
             casted = true
         end
     elseif BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_POINT) ~= 0 then
-        local target_entity = use_target or enemy_nearby(npc, cast_range + 200)
+        local target_entity = engaged_target
+        if not is_valid_enemy(target_entity, hero_team) then
+            target_entity = enemy_nearby(npc, cast_range + 200)
+        end
         if is_valid_enemy(target_entity, hero_team) then
             local position = Entity.GetAbsOrigin(target_entity)
             if position and npc_origin:Distance2D(position) <= (cast_range + 200) then
@@ -303,13 +322,18 @@ local function cast_unit_ability(npc, ability, target, hero_team, now, state)
             end
         end
     elseif BIT_BAND(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_NO_TARGET) ~= 0 then
-        if use_target and is_valid_enemy(use_target, hero_team) and distance_between(npc, use_target) <= (cast_range + 150) then
+        local target_entity = engaged_target
+        if is_valid_enemy(target_entity, hero_team) and distance_between(npc, target_entity) <= (cast_range + 150) then
             record_ability_attempt(state, ability, now)
             Ability.CastNoTarget(ability)
             casted = true
         else
             local nearby = enemy_nearby(npc, cast_range + 150)
             if nearby and is_valid_enemy(nearby, hero_team) then
+                record_ability_attempt(state, ability, now)
+                Ability.CastNoTarget(ability)
+                casted = true
+            elseif NPC.IsAttacking and NPC.IsAttacking(npc) and attack_target and distance_between(npc, attack_target) <= (cast_range + 150) then
                 record_ability_attempt(state, ability, now)
                 Ability.CastNoTarget(ability)
                 casted = true
@@ -324,7 +348,7 @@ local function cast_unit_ability(npc, ability, target, hero_team, now, state)
     return casted
 end
 
-local function process_unit_abilities(npc, target, hero_team, now, state)
+local function process_unit_abilities(npc, target, threat, hero_team, now, state)
     if NPC.IsChannellingAbility and NPC.IsChannellingAbility(npc) then
         return
     end
@@ -337,13 +361,18 @@ local function process_unit_abilities(npc, target, hero_team, now, state)
         if not ability then
             break
         end
-        if cast_unit_ability(npc, ability, target, hero_team, now, state) then
-            break
-        end
+        cast_unit_ability(npc, ability, target, threat, hero_team, now, state)
     end
 end
 
 local function select_unit_attack_target(npc, hero, hero_target, hero_team)
+    if NPC.GetAttackTarget then
+        local current = NPC.GetAttackTarget(npc)
+        if is_valid_enemy(current, hero_team) then
+            return current
+        end
+    end
+
     if is_valid_enemy(hero_target, hero_team) and distance_between(npc, hero_target) <= 2000 then
         return hero_target
     end
@@ -393,7 +422,7 @@ end
 
 local function should_control(npc, hero, prefs)
     if NPC.IsCourier(npc) then
-        return prefs.couriers
+        return false
     end
 
     if NPC.IsIllusion(npc) then
@@ -627,8 +656,21 @@ local function maintain_units(hero, units, now)
                 end
 
                 local attack_target = select_unit_attack_target(npc, hero, hero_target, hero_team)
-                local ability_target = attack_target or hero_target
-                process_unit_abilities(npc, ability_target, hero_team, now, state)
+                local ability_target = nil
+                if NPC.GetAttackTarget then
+                    ability_target = NPC.GetAttackTarget(npc)
+                    if not is_valid_enemy(ability_target, hero_team) then
+                        ability_target = nil
+                    end
+                end
+                if not ability_target then
+                    ability_target = attack_target or hero_target
+                end
+                local threat_target = ability_target
+                if not is_valid_enemy(threat_target, hero_team) then
+                    threat_target = enemy_nearby(npc, 900)
+                end
+                process_unit_abilities(npc, ability_target, threat_target, hero_team, now, state)
 
                 if attack_target and (now - state.last_mirror) >= 0.05 then
                     local target_index = Entity.GetIndex(attack_target)
