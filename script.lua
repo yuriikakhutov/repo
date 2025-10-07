@@ -3,12 +3,12 @@
 local script = {}
 
 local DARK_TROLL_WARLORD_NAME <const> = "npc_dota_neutral_dark_troll_warlord"
-local DARK_TROLL_SKELETON_NAME <const> = "npc_dota_dark_troll_warlord_skeleton_warrior"
 local RAISE_DEAD_SLOT <const> = 0
 local FOLLOW_RADIUS <const> = 600
 local FOLLOW_REPOSITION_DISTANCE <const> = 300
 local MOVE_REISSUE_DELAY <const> = 0.3
 local ATTACK_REISSUE_DELAY <const> = 0.2
+local RAISE_DEAD_TRIGGER_RADIUS <const> = 600
 
 local attack_memory = {}
 local move_memory = {}
@@ -92,8 +92,22 @@ local function can_cast_raise_dead(ability, mana)
     return true
 end
 
-local function cast_raise_dead(npc)
+local function cast_raise_dead_if_enemy_nearby(npc, hero)
     if not NPC or not NPC.GetAbilityByIndex or not Ability or not Ability.CastNoTarget then
+        return
+    end
+
+    if not hero or not Entity or not Entity.GetAbsOrigin then
+        return
+    end
+
+    local npc_pos = Entity.GetAbsOrigin(npc)
+    if not npc_pos then
+        return
+    end
+
+    local nearby_enemy = find_enemy_near_position(hero, npc_pos, RAISE_DEAD_TRIGGER_RADIUS)
+    if not nearby_enemy then
         return
     end
 
@@ -319,12 +333,11 @@ local function should_handle_dark_troll(npc, player_id)
         return false
     end
 
-    if NPC.GetUnitName then
-        local unit_name = NPC.GetUnitName(npc)
-        if unit_name ~= DARK_TROLL_WARLORD_NAME and unit_name ~= DARK_TROLL_SKELETON_NAME then
-            return false
-        end
-    else
+    if not NPC.GetUnitName then
+        return false
+    end
+
+    if NPC.GetUnitName(npc) ~= DARK_TROLL_WARLORD_NAME then
         return false
     end
 
@@ -378,7 +391,7 @@ function script.OnUpdate()
             record_processed_index(processed_indices, npc)
 
             if is_dark_troll_warlord(npc) then
-                cast_raise_dead(npc)
+                cast_raise_dead_if_enemy_nearby(npc, hero)
             end
 
             local npc_index = get_entity_index(npc)
