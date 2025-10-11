@@ -95,6 +95,18 @@ local function ability_display_name(name)
     return table.concat(parts, " ")
 end
 
+local function hero_display_name_from_entry(hero_name, entry)
+    if type(entry) == "table" then
+        local workshop = entry.workshop_guide_name or entry.workshop_hero_name or entry.override_hero_name
+        if type(workshop) == "string" and #workshop > 0 then
+            return workshop
+        end
+    end
+
+    local trimmed = hero_name:gsub("^npc_dota_hero_", "")
+    return ability_display_name(trimmed)
+end
+
 local function should_include_ability(name, info)
     if type(info) ~= "table" then
         return false
@@ -236,48 +248,59 @@ local function build_hero_catalog()
     HERO_PRIORITY_INDEX = {}
     ABILITY_TO_HERO = {}
 
-    local decoded = load_json_file("db/hero_spells.json")
-    local heroes = {}
-    if type(decoded) == "table" then
-        if type(decoded.heroes) == "table" then
-            heroes = decoded.heroes
-        else
-            heroes = decoded
-        end
-    end
+    local decoded = load_json_file("assets/data/npc_heroes.json")
+    local heroes = decoded and decoded.DOTAHeroes or {}
 
     for hero_name, entry in pairs(heroes) do
-        if type(hero_name) == "string" and type(entry) == "table" then
-            local display = entry.display or ability_display_name(hero_name)
-            local ability_list = {}
-            if type(entry.abilities) == "table" then
-                for _, ability in ipairs(entry.abilities) do
-                    if type(ability) == "string" and SPELLS[ability] then
-                        table.insert(ability_list, ability)
-                        ABILITY_TO_HERO[ability] = hero_name
+        if type(hero_name) == "string" and hero_name ~= "Version" and hero_name ~= "npc_dota_hero_base" then
+            if hero_name:match("^npc_dota_hero_") and type(entry) == "table" then
+                local ability_list = {}
+                local added = {}
+                for index = 1, 32 do
+                    local key = "Ability" .. tostring(index)
+                    local ability = entry[key]
+                    if type(ability) == "string" and ability ~= "" then
+                        ability = ability:gsub("%s+", "")
+                        if SPELLS[ability] and not BASE_RUBICK_ABILITIES[ability] and not added[ability] then
+                            table.insert(ability_list, ability)
+                            added[ability] = true
+                            ABILITY_TO_HERO[ability] = hero_name
+                        end
                     end
                 end
-            end
-            if #ability_list > 0 then
-                HERO_CATALOG[hero_name] = {
-                    display = display,
-                    abilities = clone_array(ability_list),
-                }
-                HERO_DISPLAY_TO_INTERNAL[display] = hero_name
-                table.insert(HERO_DISPLAY_LIST, display)
 
-                local order = clone_array(ability_list)
-                local enabled = {}
-                local order_map = {}
-                for idx, ability in ipairs(order) do
-                    enabled[ability] = true
-                    order_map[ability] = idx
+                if #ability_list > 0 then
+                    local display = hero_display_name_from_entry(hero_name, entry)
+                    if HERO_DISPLAY_TO_INTERNAL[display] then
+                        local suffix = 2
+                        local base = display
+                        local candidate = string.format("%s (%d)", base, suffix)
+                        while HERO_DISPLAY_TO_INTERNAL[candidate] do
+                            suffix = suffix + 1
+                            candidate = string.format("%s (%d)", base, suffix)
+                        end
+                        display = candidate
+                    end
+                    HERO_CATALOG[hero_name] = {
+                        display = display,
+                        abilities = clone_array(ability_list),
+                    }
+                    HERO_DISPLAY_TO_INTERNAL[display] = hero_name
+                    table.insert(HERO_DISPLAY_LIST, display)
+
+                    local order = clone_array(ability_list)
+                    local enabled = {}
+                    local order_map = {}
+                    for idx, ability in ipairs(order) do
+                        enabled[ability] = true
+                        order_map[ability] = idx
+                    end
+                    HERO_SETTINGS[hero_name] = {
+                        order = order,
+                        enabled = enabled,
+                        order_map = order_map,
+                    }
                 end
-                HERO_SETTINGS[hero_name] = {
-                    order = order,
-                    enabled = enabled,
-                    order_map = order_map,
-                }
             end
         end
     end
