@@ -14,66 +14,260 @@ local BLINK_ITEMS = {
     "item_arcane_blink",
 }
 
-local SPELLS = {
-    axe_berserkers_call = {
-        friendly = "Berserker's Call",
-        icon = "panorama/images/spellicons/axe_berserkers_call_png.vtex_c",
-        type = "no_target",
-        radius_key = "radius",
-    },
-    earthshaker_echo_slam = {
-        friendly = "Echo Slam",
-        icon = "panorama/images/spellicons/earthshaker_echo_slam_png.vtex_c",
-        type = "no_target",
-        radius_key = "echo_slam_damage_range",
-    },
-    tidehunter_ravage = {
-        friendly = "Ravage",
-        icon = "panorama/images/spellicons/tidehunter_ravage_png.vtex_c",
-        type = "no_target",
-        radius_key = "radius",
-    },
-    treant_overgrowth = {
-        friendly = "Overgrowth",
-        icon = "panorama/images/spellicons/treant_overgrowth_png.vtex_c",
-        type = "no_target",
-        radius_key = "radius",
-    },
-    obsidian_destroyer_sanity_eclipse = {
-        friendly = "Sanity's Eclipse",
-        icon = "panorama/images/spellicons/obsidian_destroyer_sanity_eclipse_png.vtex_c",
-        type = "point",
-        radius_key = "radius",
-    },
-    puck_dream_coil = {
-        friendly = "Dream Coil",
-        icon = "panorama/images/spellicons/puck_dream_coil_png.vtex_c",
-        type = "point",
-        radius_key = "coil_radius",
-    },
-    storm_spirit_electric_vortex = {
-        friendly = "Electric Vortex",
-        icon = "panorama/images/spellicons/storm_spirit_electric_vortex_png.vtex_c",
-        type = "unit",
-    },
-    enigma_black_hole = {
-        friendly = "Black Hole",
-        icon = "panorama/images/spellicons/enigma_black_hole_png.vtex_c",
-        type = "no_target",
-        radius_key = "pull_radius",
-        channel = true,
-    },
-    magnataur_reverse_polarity = {
-        friendly = "Reverse Polarity",
-        icon = "panorama/images/spellicons/magnataur_reverse_polarity_png.vtex_c",
-        type = "no_target",
-        radius_key = "pull_radius",
-    },
+local JSON = dofile("assets/JSON.lua")
+
+local ABILITY_DATA = nil
+local SPELLS = {}
+local SPELL_LIST = {}
+local FRIENDLY_TO_TECH = {}
+
+local RADIUS_KEYS = {
+    "radius",
+    "aoe",
+    "aoe_radius",
+    "area_of_effect",
+    "effect_radius",
+    "impact_radius",
+    "pull_radius",
+    "coil_radius",
+    "ring_radius",
+    "AbilityRadius",
 }
 
-local FRIENDLY_TO_TECH = {}
-for name, data in pairs(SPELLS) do
-    FRIENDLY_TO_TECH[data.friendly] = name
+local BASE_RUBICK_ABILITIES = {
+    [TELEKINESIS_NAME] = true,
+    ["rubick_fade_bolt"] = true,
+    ["rubick_null_field"] = true,
+    ["rubick_spell_steal"] = true,
+    ["rubick_empty1"] = true,
+    ["rubick_empty2"] = true,
+    ["rubick_empty3"] = true,
+    ["rubick_empty4"] = true,
+    ["rubick_hidden1"] = true,
+    ["rubick_hidden2"] = true,
+    ["rubick_hidden3"] = true,
+    ["rubick_hidden4"] = true,
+    ["rubick_hidden5"] = true,
+}
+
+local function load_ability_data()
+    if ABILITY_DATA then
+        return ABILITY_DATA
+    end
+
+    local file = io.open("assets/data/npc_abilities.json", "r")
+    if not file then
+        ABILITY_DATA = {}
+        return ABILITY_DATA
+    end
+
+    local raw = file:read("*a")
+    file:close()
+
+    local decoded = JSON:decode(raw)
+    ABILITY_DATA = decoded and decoded.DOTAAbilities or {}
+    return ABILITY_DATA
+end
+
+local function has_behavior(info, flag)
+    local behavior = info and info.AbilityBehavior
+    if type(behavior) ~= "string" then
+        return false
+    end
+    return behavior:find(flag, 1, true) ~= nil
+end
+
+local function ability_display_name(name)
+    local parts = {}
+    for chunk in name:gmatch("[^_]+") do
+        if #chunk > 0 then
+            table.insert(parts, chunk:sub(1, 1):upper() .. chunk:sub(2))
+        end
+    end
+    return table.concat(parts, " ")
+end
+
+local function should_include_ability(name, info)
+    if type(info) ~= "table" then
+        return false
+    end
+    if name:match("^item_") then
+        return false
+    end
+    if name:match("^special_bonus") then
+        return false
+    end
+    if name:match("^attribute_bonus") then
+        return false
+    end
+    if name:match("^ability_") then
+        return false
+    end
+    if has_behavior(info, "DOTA_ABILITY_BEHAVIOR_PASSIVE") and not has_behavior(info, "DOTA_ABILITY_BEHAVIOR_POINT") and not has_behavior(info, "DOTA_ABILITY_BEHAVIOR_UNIT_TARGET") and not has_behavior(info, "DOTA_ABILITY_BEHAVIOR_NO_TARGET") then
+        return false
+    end
+    return true
+end
+
+local function determine_cast_type(info)
+    if has_behavior(info, "DOTA_ABILITY_BEHAVIOR_VECTOR_TARGETING") then
+        return nil
+    end
+    if has_behavior(info, "DOTA_ABILITY_BEHAVIOR_TOGGLE") then
+        return nil
+    end
+    if has_behavior(info, "DOTA_ABILITY_BEHAVIOR_POINT") and not has_behavior(info, "DOTA_ABILITY_BEHAVIOR_NO_TARGET") then
+        return "point"
+    end
+    if has_behavior(info, "DOTA_ABILITY_BEHAVIOR_UNIT_TARGET") then
+        return "unit"
+    end
+    if has_behavior(info, "DOTA_ABILITY_BEHAVIOR_NO_TARGET") then
+        return "no_target"
+    end
+    return nil
+end
+
+local function is_channelled(info)
+    if has_behavior(info, "DOTA_ABILITY_BEHAVIOR_CHANNELLED") then
+        return true
+    end
+    local channel_time = info and info.AbilityChannelTime
+    if type(channel_time) == "string" then
+        return channel_time ~= "0"
+    end
+    if type(channel_time) == "number" then
+        return channel_time > 0
+    end
+    return false
+end
+
+local function build_spell_catalog()
+    if #SPELL_LIST > 0 then
+        return SPELL_LIST
+    end
+
+    local data = load_ability_data()
+    local entries = {}
+    for name, info in pairs(data) do
+        if should_include_ability(name, info) then
+            local cast_type = determine_cast_type(info)
+            if cast_type then
+                local friendly = ability_display_name(name)
+                local icon = "panorama/images/spellicons/" .. name .. "_png.vtex_c"
+                local entry = {
+                    friendly = friendly,
+                    icon = icon,
+                    type = cast_type,
+                    data = info,
+                    channel = is_channelled(info),
+                }
+                SPELLS[name] = entry
+                FRIENDLY_TO_TECH[friendly] = name
+                table.insert(entries, { friendly = friendly, tech = name, icon = icon })
+            end
+        end
+    end
+
+    table.sort(entries, function(a, b)
+        return a.friendly < b.friendly
+    end)
+
+    SPELL_LIST = entries
+    return SPELL_LIST
+end
+
+local function parse_number_field(field)
+    if type(field) == "number" then
+        return field
+    end
+    if type(field) == "string" then
+        local num = field:match("%-?[%d%.]+")
+        return tonumber(num)
+    end
+    if type(field) == "table" then
+        if field.value ~= nil then
+            local v = parse_number_field(field.value)
+            if v then
+                return v
+            end
+        end
+        for _, inner in pairs(field) do
+            local v = parse_number_field(inner)
+            if v then
+                return v
+            end
+        end
+    end
+    return nil
+end
+
+local function ability_targets_enemies(info)
+    local data = info and info.data
+    local team = data and data.AbilityUnitTargetTeam
+    if type(team) == "string" then
+        if team:find("ENEMY", 1, true) or team:find("BOTH", 1, true) then
+            return true
+        end
+        return false
+    end
+    return true
+end
+
+local function get_cast_range(ability, info)
+    local range = Ability.GetCastRange(ability)
+    if range and range > 0 then
+        return range
+    end
+    local data = info and info.data
+    local value = parse_number_field(data and data.AbilityCastRange)
+    if value and value > 0 then
+        return value
+    end
+    local values = data and data.AbilityValues
+    if type(values) == "table" then
+        for _, key in ipairs({ "AbilityCastRange", "cast_range", "range", "distance" }) do
+            local v = parse_number_field(values[key])
+            if v and v > 0 then
+                return v
+            end
+        end
+    end
+    return 600
+end
+
+local function get_effect_radius(ability, info)
+    for _, key in ipairs(RADIUS_KEYS) do
+        local val = Ability.GetLevelSpecialValueFor(ability, key)
+        if val and val > 0 then
+            return val
+        end
+    end
+
+    local data = info and info.data
+    local values = data and data.AbilityValues
+    if type(values) == "table" then
+        for _, key in ipairs(RADIUS_KEYS) do
+            local v = parse_number_field(values[key])
+            if v and v > 0 then
+                return v
+            end
+        end
+        for key, value in pairs(values) do
+            if type(key) == "string" and (key:find("radius") or key:find("aoe")) then
+                local v = parse_number_field(value)
+                if v and v > 0 then
+                    return v
+                end
+            end
+        end
+    end
+
+    local range = Ability.GetCastRange(ability)
+    if range and range > 0 then
+        return math.min(range, 600)
+    end
+    return 300
 end
 
 local function vec3(x, y, z)
@@ -132,6 +326,7 @@ local ui = {}
 ui.enable = group_main:Switch("Enable Script", false, "\u{f0e7}")
 ui.mode = group_main:Combo("Use Mode", { "Manual Toggle", "Always Auto" }, 0)
 ui.toggle_key = group_main:Bind("Toggle Key", Enum.ButtonCode.KEY_T)
+ui.combo_key = group_main:Bind("Cast All Key", Enum.ButtonCode.KEY_G)
 ui.min_targets = group_main:Slider("Min Targets", 1, 5, 2, function(v) return tostring(v) end)
 ui.blink_offset = group_main:Slider("Blink Offset", -200, 200, 0, function(v) return tostring(v) .. " units" end)
 ui.use_refresher = group_main:Switch("Use Refresher Orb", false, "\u{f021}")
@@ -143,8 +338,8 @@ ui.tele_preference = group_tele:Combo("Preferred landing", {
     "Nearest allied hero",
     "Towards Rubick",
 }, 0)
-ui.tele_gap = group_tele:Slider("Minimum gap from target", 80, 0, 300, function(v) return tostring(v) .. " units" end)
-ui.tele_max_distance = group_tele:Slider("Max throw distance override", 0, 0, 600, function(v)
+ui.tele_gap = group_tele:Slider("Minimum gap from target", 0, 300, 80, function(v) return tostring(v) .. " units" end)
+ui.tele_max_distance = group_tele:Slider("Max throw distance override", 0, 600, 0, function(v)
     if v == 0 then
         return "Default"
     end
@@ -155,9 +350,11 @@ ui.visual_debug = group_visual:Switch("Visual Debug", false, "\u{f06e}")
 ui.radius_color = group_visual:ColorPicker("In Range Color", Color(0, 255, 0))
 ui.out_of_range_color = group_visual:ColorPicker("Out of Range Color", Color(255, 0, 0))
 
+local spell_catalog = build_spell_catalog()
+
 local multi_items = {}
-for name, data in pairs(SPELLS) do
-    table.insert(multi_items, { data.friendly, data.icon, true })
+for _, entry in ipairs(spell_catalog) do
+    table.insert(multi_items, { entry.friendly, entry.icon, true })
 end
 
 ui.spell_select = group_spell:MultiSelect("Spells to Use", multi_items, true)
@@ -176,6 +373,11 @@ local state = {
     refresher_used = false,
     particle = nil,
     last_radius = 0,
+    combo_mode = false,
+    combo_queue = {},
+    combo_index = 1,
+    combo_key_down = false,
+    combo_min_targets = 1,
 }
 
 local PANEL = {
@@ -249,6 +451,11 @@ local function reset_state()
     state.next_allowed_time = 0
     state.refresher_used = false
     state.last_radius = 0
+    state.combo_mode = false
+    state.combo_queue = {}
+    state.combo_index = 1
+    state.combo_key_down = false
+    state.combo_min_targets = 1
 end
 
 local function get_local_rubick()
@@ -365,10 +572,7 @@ local function find_best_cluster(heroes, radius, min_targets)
 end
 
 local function plan_no_target(hero, ability, info, min_targets)
-    local radius = Ability.GetLevelSpecialValueFor(ability, info.radius_key or "radius")
-    if not radius or radius <= 0 then
-        radius = Ability.GetCastRange(ability) or 300
-    end
+    local radius = get_effect_radius(ability, info)
     local prioritized = get_enemy_priority(hero)
     if #prioritized > 0 then
         local best_position, count = find_best_cluster(prioritized, radius, clamp(min_targets, 1, #prioritized))
@@ -378,6 +582,7 @@ local function plan_no_target(hero, ability, info, min_targets)
                 type = "no_target",
                 cast_position = best_position,
                 radius = radius,
+                range = radius,
                 enemy_count = count,
             }
         end
@@ -398,24 +603,24 @@ local function plan_no_target(hero, ability, info, min_targets)
         type = "no_target",
         cast_position = best_position,
         radius = radius,
+        range = radius,
         enemy_count = count,
     }
 end
 
 local function plan_point(hero, ability, info, min_targets)
-    local radius = Ability.GetLevelSpecialValueFor(ability, info.radius_key or "radius")
-    if not radius or radius <= 0 then
-        radius = Ability.GetCastRange(ability) or 300
-    end
+    local radius = get_effect_radius(ability, info)
+    local range = get_cast_range(ability, info)
     local prioritized = get_enemy_priority(hero)
     if #prioritized > 0 then
         local best_position, count = find_best_cluster(prioritized, radius, clamp(min_targets, 1, #prioritized))
-        if best_position then
+        if best_position and distance(Entity.GetAbsOrigin(hero), best_position) <= range then
             return {
                 ability = ability,
                 type = "point",
                 cast_position = best_position,
                 radius = radius,
+                range = range,
                 enemy_count = count,
             }
         end
@@ -428,7 +633,7 @@ local function plan_point(hero, ability, info, min_targets)
         end
     end
     local best_position, count = find_best_cluster(enemies, radius, min_targets)
-    if not best_position then
+    if not best_position or distance(Entity.GetAbsOrigin(hero), best_position) > range then
         return nil
     end
     return {
@@ -436,15 +641,16 @@ local function plan_point(hero, ability, info, min_targets)
         type = "point",
         cast_position = best_position,
         radius = radius,
+        range = range,
         enemy_count = count,
     }
 end
 
-local function plan_unit(hero, ability)
-    local range = Ability.GetCastRange(ability)
-    if not range or range <= 0 then
-        range = 350
+local function plan_unit(hero, ability, info)
+    if not ability_targets_enemies(info) then
+        return nil
     end
+    local range = get_cast_range(ability, info)
     local prioritized = get_enemy_priority(hero)
     local origin = Entity.GetAbsOrigin(hero)
     local best_target
@@ -481,14 +687,37 @@ local function plan_unit(hero, ability)
         type = "unit",
         target = best_target,
         cast_position = Entity.GetAbsOrigin(best_target),
+        range = range,
         radius = 0,
         enemy_count = 1,
     }
 end
 
+local function ability_is_ready(hero, ability)
+    if not ability then
+        return nil
+    end
+    if Ability.IsHidden and Ability.IsHidden(ability) then
+        return nil
+    end
+    if Ability.GetLevel(ability) and Ability.GetLevel(ability) <= 0 then
+        return nil
+    end
+    if not Ability.IsCastable(ability, NPC.GetMana(hero)) then
+        return nil
+    end
+    return ability
+end
+
 local function build_plan(hero, ability_name, min_targets)
+    if BASE_RUBICK_ABILITIES[ability_name] then
+        return nil
+    end
     local ability = NPC.GetAbility(hero, ability_name)
-    if not ability or not Ability.IsCastable(ability, NPC.GetMana(hero)) then
+    if not ability or not Ability.IsStolen(ability) then
+        return nil
+    end
+    if not ability_is_ready(hero, ability) then
         return nil
     end
     if not Ability.IsStolen(ability) then
@@ -500,13 +729,17 @@ local function build_plan(hero, ability_name, min_targets)
         return nil
     end
 
+    if info.type ~= "no_target" and not ability_targets_enemies(info) then
+        return nil
+    end
+
     local plan
     if info.type == "no_target" then
         plan = plan_no_target(hero, ability, info, min_targets)
     elseif info.type == "point" then
         plan = plan_point(hero, ability, info, min_targets)
     elseif info.type == "unit" then
-        plan = plan_unit(hero, ability)
+        plan = plan_unit(hero, ability, info)
     end
 
     if plan then
@@ -515,13 +748,50 @@ local function build_plan(hero, ability_name, min_targets)
     return plan
 end
 
+local function start_combo(hero)
+    local order = ui.spell_select:List()
+    if not order then
+        return false
+    end
+
+    local queue = {}
+    local seen = {}
+    local min_targets = adjusted_min_targets(hero)
+
+    for _, friendly in ipairs(order) do
+        if ui.spell_select:Get(friendly) then
+            local tech = FRIENDLY_TO_TECH[friendly]
+            if tech and not seen[tech] then
+                local ability = NPC.GetAbility(hero, tech)
+                if ability and Ability.IsStolen(ability) and ability_is_ready(hero, ability) then
+                    table.insert(queue, tech)
+                    seen[tech] = true
+                end
+            end
+        end
+    end
+
+    if #queue == 0 then
+        return false
+    end
+
+    state.combo_mode = true
+    state.combo_queue = queue
+    state.combo_index = 1
+    state.combo_min_targets = min_targets
+    state.pending_plan = nil
+    state.stage = "idle"
+    state.refresher_used = false
+    return true
+end
+
 local function needs_blink(hero, plan)
     if not plan then
         return false
     end
     local hero_pos = Entity.GetAbsOrigin(hero)
     local ability = plan.ability
-    local range = Ability.GetCastRange(ability) or 0
+    local range = plan.range or Ability.GetCastRange(ability) or 0
     local dist = distance(hero_pos, plan.cast_position)
 
     if plan.type == "no_target" then
@@ -551,7 +821,7 @@ local function blink_position(hero, plan)
         return vec_add(target_pos, vec_scale(direction, offset))
     end
 
-    local range = Ability.GetCastRange(plan.ability)
+    local range = plan.range or Ability.GetCastRange(plan.ability)
     if not range or range <= 0 then
         range = plan.radius + 150
     end
@@ -664,7 +934,8 @@ end
 
 local function handle_auto_cast(hero)
     local now = get_time()
-    if not auto_mode_active then
+    local combo_active = state.combo_mode
+    if not combo_active and not auto_mode_active then
         reset_state()
         return
     end
@@ -709,38 +980,71 @@ local function handle_auto_cast(hero)
         return
     end
 
-    local min_targets = adjusted_min_targets(hero)
-    local order = ui.spell_select:List()
-    local available_plans = {}
-    for _, friendly in ipairs(order) do
-        if ui.spell_select:Get(friendly) then
-            local tech = FRIENDLY_TO_TECH[friendly]
-            if tech then
-                local plan = build_plan(hero, tech, min_targets)
-                if valid_plan(plan) then
-                    plan.name = friendly
-                    plan.tech = tech
-                    plan.needs_blink = needs_blink(hero, plan)
-                    table.insert(available_plans, plan)
+    local chosen = nil
+    local combo_min_targets = state.combo_min_targets
+
+    if combo_active then
+        while state.combo_index <= #state.combo_queue do
+            local tech = state.combo_queue[state.combo_index]
+            state.combo_index = state.combo_index + 1
+            local plan = build_plan(hero, tech, combo_min_targets)
+            if valid_plan(plan) then
+                local info = SPELLS[tech]
+                plan.name = info and info.friendly or tech
+                plan.tech = tech
+                plan.needs_blink = needs_blink(hero, plan)
+                chosen = plan
+                break
+            end
+        end
+        if not chosen then
+            state.combo_mode = false
+            state.combo_queue = {}
+            state.combo_index = 1
+            state.combo_min_targets = 1
+            combo_active = false
+        end
+    end
+
+    if not chosen then
+        if not auto_mode_active then
+            draw_radius(nil, hero)
+            return
+        end
+        local min_targets = adjusted_min_targets(hero)
+        local order = ui.spell_select:List()
+        local available_plans = {}
+        if order then
+            for _, friendly in ipairs(order) do
+                if ui.spell_select:Get(friendly) then
+                    local tech = FRIENDLY_TO_TECH[friendly]
+                    if tech then
+                        local plan = build_plan(hero, tech, min_targets)
+                        if valid_plan(plan) then
+                            plan.name = friendly
+                            plan.tech = tech
+                            plan.needs_blink = needs_blink(hero, plan)
+                            table.insert(available_plans, plan)
+                        end
+                    end
                 end
             end
         end
-    end
 
-    if #available_plans == 0 then
-        draw_radius(nil, hero)
-        return
-    end
-
-    local chosen = nil
-    for _, plan in ipairs(available_plans) do
-        if not plan.needs_blink then
-            chosen = plan
-            break
+        if #available_plans == 0 then
+            draw_radius(nil, hero)
+            return
         end
-    end
-    if not chosen then
-        chosen = available_plans[1]
+
+        for _, plan in ipairs(available_plans) do
+            if not plan.needs_blink then
+                chosen = plan
+                break
+            end
+        end
+        if not chosen then
+            chosen = available_plans[1]
+        end
     end
 
     draw_radius(chosen, hero)
@@ -890,6 +1194,12 @@ function script.OnUpdate()
         reset_state()
         return
     end
+
+    local combo_down = ui.combo_key:IsDown()
+    if combo_down and not state.combo_key_down then
+        start_combo(hero)
+    end
+    state.combo_key_down = combo_down
 
     handle_auto_cast(hero)
     handle_telekinesis(hero)
